@@ -94,6 +94,8 @@ bool IRInstruction::consumesReference(int srcNo) const {
     case ConcatStrStr:
     case ConcatStrInt:
     case ConcatCellCell:
+    case ConcatStr3:
+    case ConcatStr4:
       // Call a helper that decrefs the first argument
       return srcNo == 0;
 
@@ -126,10 +128,6 @@ bool IRInstruction::consumesReference(int srcNo) const {
       // Consumes the $this/Class field of the ActRec
       return srcNo == 2;
 
-    case Call:
-      // Inputs 3+ are arguments to the function
-      return srcNo >= 4;
-
     case ColAddElemC:
       // value at index 2
       return srcNo == 2;
@@ -142,7 +140,7 @@ bool IRInstruction::consumesReference(int srcNo) const {
       return srcNo == 0;
 
     case CreateAFWH:
-      return srcNo == 2;
+      return srcNo == 3;
 
     default:
       return true;
@@ -180,7 +178,7 @@ bool IRInstruction::isRawLoad() const {
     case LdElem:
     case LdProp:
     case LdPackedArrayElem:
-    case Unbox:
+    case LdGbl:
       return true;
 
     default:
@@ -423,11 +421,16 @@ std::string IRInstruction::toString() const {
 
 std::string BCMarker::show() const {
   assert(valid());
-  return folly::format("--- bc {}{}, spOff {} ({})",
-                       m_sk.offset(),
-                       m_sk.resumed() ? "r" : "",
-                       m_spOff,
-                       m_sk.func()->fullName()->data()).str();
+  return folly::format(
+    "--- bc {}{}, spOff {} ({}){}",
+    m_sk.offset(),
+    m_sk.resumed() ? "r" : "",
+    m_spOff,
+    m_sk.func()->fullName()->data(),
+    m_profTransID != kInvalidTransID
+      ? folly::format(" [profTrans={}]", m_profTransID).str()
+      : std::string{}
+  ).str();
 }
 
 bool BCMarker::valid() const {
@@ -436,10 +439,10 @@ bool BCMarker::valid() const {
     m_sk.valid() &&
     m_sk.offset() >= m_sk.func()->base() &&
     m_sk.offset() < m_sk.func()->past() &&
+    // When inlining is on, we may modify markers to weird values in
+    // case reentry happens.
     (RuntimeOption::EvalHHIREnableGenTimeInlining ||
      m_spOff <= m_sk.func()->numSlotsInFrame() + m_sk.func()->maxStackCells());
-  // When inlining is on, we may modify markers to weird values in case reentry
-  // happens.
 }
 
 }}

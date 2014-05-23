@@ -66,13 +66,21 @@ Variant f_array_keys(const Variant& input, const Variant& search_value = null_va
 Variant f_array_map(int _argc, const Variant& callback, const Variant& arr1,
                     const Array& _argv = null_array);
 
-Variant f_array_merge_recursive(int _argc, const Variant& array1, const Array& _argv = null_array);
+Variant f_array_merge_recursive(int _argc, const Variant& array1,
+                                const Variant& array2 = null_variant,
+                                const Array& _argv = null_array);
 
-Variant f_array_merge(int _argc, const Variant& array1, const Array& _argv = null_array);
+Variant f_array_merge(int _argc, const Variant& array1,
+                      const Variant& array2 = null_variant,
+                      const Array& _argv = null_array);
 
-Variant f_array_replace_recursive(int _argc, const Variant& array1, const Array& _argv = null_array);
+Variant f_array_replace_recursive(int _argc, const Variant& array1,
+                                  const Variant& array2 = null_variant,
+                                  const Array& _argv = null_array);
 
-Variant f_array_replace(int _argc, const Variant& array1, const Array& _argv = null_array);
+Variant f_array_replace(int _argc, const Variant& array1,
+                        const Variant& array2 = null_variant,
+                        const Array& _argv = null_array);
 
 Variant f_array_pad(const Variant& input, int pad_size, const Variant& pad_value);
 Variant f_array_pop(VRefParam array);
@@ -106,7 +114,11 @@ bool f_array_walk_recursive(VRefParam input, const Variant& funcname,
 bool f_array_walk(VRefParam input, const Variant& funcname,
                   const Variant& userdata = null_variant);
 
-Array f_compact(int _argc, const Variant& varname, const Array& _argv = null_array);
+Array f_compact(int _argc, const Variant& varname,
+                const Array& _argv = null_array);
+// __SystemLib\\compact_sl
+Array f_compact_sl(int _argc, const Variant& varname,
+                  const Array& _argv = null_array);
 
 bool f_shuffle(VRefParam array);
 int64_t f_count(const Variant& var, int64_t mode = 0);

@@ -151,12 +151,8 @@ void in(ISS& env, const bc::Dup& op) {
   push(env, val);
 }
 
-void in(ISS& env, const bc::AssertTL&)       { nothrow(env); }
-void in(ISS& env, const bc::AssertTStk&)     { nothrow(env); }
-void in(ISS& env, const bc::AssertObjL&)     { nothrow(env); }
-void in(ISS& env, const bc::AssertObjStk&)   { nothrow(env); }
-void in(ISS& env, const bc::PredictTL&)      { nothrow(env); }
-void in(ISS& env, const bc::PredictTStk&)    { nothrow(env); }
+void in(ISS& env, const bc::AssertRATL&)     { nothrow(env); }
+void in(ISS& env, const bc::AssertRATStk&)   { nothrow(env); }
 void in(ISS& env, const bc::BreakTraceHint&) { nothrow(env); }
 
 void in(ISS& env, const bc::Box&) {
@@ -288,24 +284,24 @@ void in(ISS& env, const bc::ClsCns& op) {
   auto const t1 = topA(env);
   if (t1.strictSubtypeOf(TCls)) {
     auto const dcls = dcls_of(t1);
-    if (dcls.type == DCls::Exact) {
+    if (dcls.type == ClsTag::Exact) {
       return reduce(env, bc::PopA {},
                          bc::ClsCnsD { op.str1, dcls.cls.name() });
     }
   }
   popA(env);
-  push(env, TInitUnc);
+  push(env, TInitCell);
 }
 
 void in(ISS& env, const bc::ClsCnsD& op) {
-  if (!options.HardConstProp) return push(env, TInitUnc);
+  if (!options.HardConstProp) return push(env, TInitCell);
   if (auto const rcls = env.index.resolve_class(env.ctx, op.str2)) {
     auto const t = env.index.lookup_class_constant(env.ctx, *rcls, op.str1);
     constprop(env);
     push(env, t);
     return;
   }
-  push(env, TInitUnc);
+  push(env, TInitCell);
 }
 
 void in(ISS& env, const bc::File&)  { nothrow(env); push(env, TSStr); }
@@ -338,6 +334,17 @@ void in(ISS& env, const bc::Concat& op) {
   push(env, TStr);
 }
 
+void in(ISS& env, const bc::ConcatN& op) {
+  auto n = op.arg1;
+  assert(n > 1);
+  assert(n < 5);
+
+  for (auto i = 0; i < n; ++i) {
+    popC(env);
+  }
+  push(env, TStr);
+}
+
 template<class Op, class Fun>
 void arithImpl(ISS& env, const Op& op, Fun fun) {
   constprop(env);
@@ -351,6 +358,7 @@ void in(ISS& env, const bc::Sub& op)    { arithImpl(env, op, typeSub); }
 void in(ISS& env, const bc::Mul& op)    { arithImpl(env, op, typeMul); }
 void in(ISS& env, const bc::Div& op)    { arithImpl(env, op, typeDiv); }
 void in(ISS& env, const bc::Mod& op)    { arithImpl(env, op, typeMod); }
+void in(ISS& env, const bc::Pow& op)    { arithImpl(env, op, typePow); }
 void in(ISS& env, const bc::BitAnd& op) { arithImpl(env, op, typeBitAnd); }
 void in(ISS& env, const bc::BitOr& op)  { arithImpl(env, op, typeBitOr); }
 void in(ISS& env, const bc::BitXor& op) { arithImpl(env, op, typeBitXor); }
@@ -1224,12 +1232,16 @@ void in(ISS& env, const bc::FPushObjMethodD& op) {
   folly::Optional<res::Class> rcls;
   if (is_opt(obj)) obj = unopt(obj);
   if (obj.strictSubtypeOf(TObj)) rcls = dcls_of(objcls(obj)).cls;
+
+  folly::Optional<res::Func> func = folly::none;
+  if (obj.subtypeOf(TObj)) {
+    func = env.index.resolve_method(env.ctx, objcls(obj), op.str2);
+    if (func && !rcls) rcls = func->interfaceCls();
+  }
   fpiPush(env, ActRec {
     FPIKind::ObjMeth,
     rcls,
-    obj.subtypeOf(TObj)
-      ? env.index.resolve_method(env.ctx, objcls(obj), op.str2)
-      : folly::none
+    func
   });
 }
 
@@ -1257,12 +1269,13 @@ void in(ISS& env, const bc::FPushClsMethod& op) {
   auto const t1 = popA(env);
   auto const t2 = popC(env);
   auto const v2 = tv(t2);
-  auto const rfunc =
-    v2 && v2->m_type == KindOfStaticString
-      ? env.index.resolve_method(env.ctx, t1, v2->m_data.pstr)
-      : folly::none;
   folly::Optional<res::Class> rcls;
   if (t1.strictSubtypeOf(TCls)) rcls = dcls_of(t1).cls;
+  folly::Optional<res::Func> rfunc = folly::none;
+  if (v2 && v2->m_type == KindOfStaticString) {
+    rfunc = env.index.resolve_method(env.ctx, t1, v2->m_data.pstr);
+    if (rfunc && !rcls) rcls = rfunc->interfaceCls();
+  }
   fpiPush(env, ActRec { FPIKind::ClsMeth, rcls, rfunc });
 }
 
@@ -1284,7 +1297,7 @@ void in(ISS& env, const bc::FPushCtor& op) {
   auto const t1 = topA(env);
   if (t1.strictSubtypeOf(TCls)) {
     auto const dcls = dcls_of(t1);
-    if (dcls.type == DCls::Exact) {
+    if (dcls.type == ClsTag::Exact) {
       return reduce(env, bc::PopA {},
                          bc::FPushCtorD { op.arg1, dcls.cls.name() });
     }
@@ -1824,11 +1837,15 @@ void in(ISS& env, const bc::CreateCl& op) {
     for (auto i = uint32_t{0}; i < nargs; ++i) {
       usedVars[nargs - i - 1] = popT(env);
     }
-    merge_closure_use_vars_into(
-      env.collect.closureUseTypes,
-      clsPair.second,
-      usedVars
-    );
+
+    // TODO(#3363851): this shouldn't be a loop
+    for (auto& c : clsPair.second) {
+      merge_closure_use_vars_into(
+        env.collect.closureUseTypes,
+        c,
+        usedVars
+      );
+    }
   }
 
   return push(env, objExact(clsPair.first));
@@ -1946,6 +1963,17 @@ void in(ISS& env, const bc::InitProp& op) {
   case InitPropOp::NonStatic:
     mergeThisProp(env, op.str1, t);
     break;
+  }
+}
+
+void in(ISS& env, const bc::Silence& op) {
+  nothrow(env);
+  switch (op.subop) {
+    case SilenceOp::Start:
+      setLoc(env, op.loc1, TInt);
+      break;
+    case SilenceOp::End:
+      break;
   }
 }
 

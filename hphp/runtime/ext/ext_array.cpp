@@ -20,7 +20,7 @@
 
 #include "hphp/runtime/base/container-functions.h"
 #include "hphp/runtime/ext/ext_function.h"
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/zend-collator.h"
@@ -188,11 +188,11 @@ Variant f_array_column(const Variant& input, const Variant& val_key,
     }
 
     if (idx.isNull() || !sub.exists(idx)) {
-      ret.set(elem);
+      ret.append(elem);
     } else if (sub[idx].isObject()) {
-      ret.set(sub[idx].toString(), elem);
+      ret.setKeyUnconverted(sub[idx].toString(), elem);
     } else {
-      ret.set(sub[idx], elem);
+      ret.setKeyUnconverted(sub[idx], elem);
     }
   }
   return ret.toArray();
@@ -206,12 +206,13 @@ Variant f_array_combine(const Variant& keys, const Variant& values) {
                   "arrays or collections");
     return uninit_null();
   }
-  if (UNLIKELY(getContainerSize(cell_keys) != getContainerSize(cell_values))) {
+  auto keys_size = getContainerSize(cell_keys);
+  if (UNLIKELY(keys_size != getContainerSize(cell_values))) {
     raise_warning("array_combine(): Both parameters should have an equal "
                   "number of elements");
     return false;
   }
-  Array ret = Array::Create();
+  Array ret = Array::attach(MixedArray::MakeReserveMixed(keys_size));
   for (ArrayIter iter1(cell_keys), iter2(cell_values);
        iter1; ++iter1, ++iter2) {
     const Variant& key = iter1.secondRefPlus();
@@ -246,14 +247,15 @@ Variant f_array_fill_keys(const Variant& keys, const Variant& value) {
     // This is intentionally different to the $foo[$invalid_key] coercion.
     // See tests/slow/ext_array/array_fill_keys_tostring.php for examples.
     if (LIKELY(key.isInteger() || key.isString())) {
-      ai.set(key, value);
-    } else if (RuntimeOption::EnableHipHopSyntax) {
-      // @todo (fredemmott): Use the Zend toString() behavior, but retain the
-      // warning/error behind a separate config setting
-      raise_warning("array_fill_keys: keys must be ints or strings");
-      ai.set(key, value);
+      ai.setKeyUnconverted(key, value);
     } else {
-      ai.set(key.toString(), value);
+      if (RuntimeOption::StrictArrayFillKeys == HackStrictOption::WARN) {
+        raise_warning("array_fill_keys: keys must be ints or strings");
+      } else if (RuntimeOption::StrictArrayFillKeys ==
+                 HackStrictOption::ERROR) {
+        raise_error("array_fill_keys: keys must be ints or strings");
+      }
+      ai.setKeyUnconverted(key.toString(), value);
     }
   }
   return ai.create();
@@ -265,12 +267,20 @@ Variant f_array_fill(int start_index, int num, const Variant& value) {
     return false;
   }
 
-  Array ret;
-  ret.set(start_index, value);
-  for (int i = num - 1; i > 0; i--) {
-    ret.append(value);
+  if (start_index == 0) {
+    PackedArrayInit pai(num);
+    for (size_t k = 0; k < num; k++) {
+      pai.append(value);
+    }
+    return pai.toVariant();
+  } else {
+    ArrayInit ret(num, ArrayInit::Mixed{});
+    ret.set(start_index, value);
+    for (int i = num - 1; i > 0; i--) {
+      ret.append(value);
+    }
+    return ret.toVariant();
   }
-  return ret;
 }
 
 Variant f_array_flip(const Variant& trans) {
@@ -285,7 +295,7 @@ Variant f_array_flip(const Variant& trans) {
   for (ArrayIter iter(transCell); iter; ++iter) {
     const Variant& value(iter.secondRefPlus());
     if (value.isString() || value.isInteger()) {
-      ret.set(value, iter.first());
+      ret.setKeyUnconverted(value, iter.first());
     } else {
       raise_warning("Can only flip STRING and INTEGER values!");
     }
@@ -388,11 +398,20 @@ Variant f_array_map(int _argc, const Variant& callback, const Variant& arr1, con
       }
     }
     ArrayInit ret(getContainerSize(cell_arr1), ArrayInit::Map{});
+    bool keyConverted = (cell_arr1.m_type == KindOfArray);
+    if (!keyConverted) {
+      auto col_type = cell_arr1.m_data.pobj->getCollectionType();
+      assert(col_type != Collection::Type::InvalidType);
+      keyConverted = !Collection::isTypeWithPossibleIntStringKeys(col_type);
+    }
     for (ArrayIter iter(arr1); iter; ++iter) {
       Variant result;
       g_context->invokeFuncFew((TypedValue*)&result, ctx, 1,
                                iter.secondRefPlus().asCell());
-      ret.add(iter.first(), result, true);
+      // if keyConverted is false, it's possible that ret will have fewer
+      // elements than cell_arr1; keys int(1) and string('1') may both be
+      // present
+      ret.add(iter.first(), result, keyConverted);
     }
     return ret.toArray();
   }
@@ -485,10 +504,17 @@ static void php_array_merge_recursive(PointerSet &seen, bool check,
 }
 
 Variant f_array_merge(int _argc, const Variant& array1,
+                      const Variant& array2 /* = null_variant */,
                       const Array& _argv /* = null_array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   php_array_merge(ret, arr_array1);
+
+  if (UNLIKELY(_argc < 2)) return ret;
+
+  getCheckedArray(array2);
+  php_array_merge(ret, arr_array2);
+
   for (ArrayIter iter(_argv); iter; ++iter) {
     Variant v = iter.second();
     if (!v.isArray()) {
@@ -502,12 +528,20 @@ Variant f_array_merge(int _argc, const Variant& array1,
 }
 
 Variant f_array_merge_recursive(int _argc, const Variant& array1,
+                                const Variant& array2 /* = null_variant */,
                                 const Array& _argv /* = null_array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   PointerSet seen;
   php_array_merge_recursive(seen, false, ret, arr_array1);
   assert(seen.empty());
+
+  if (UNLIKELY(_argc < 2)) return ret;
+
+  getCheckedArray(array2);
+  php_array_merge_recursive(seen, false, ret, arr_array2);
+  assert(seen.empty());
+
   for (ArrayIter iter(_argv); iter; ++iter) {
     Variant v = iter.second();
     if (!v.isArray()) {
@@ -564,10 +598,17 @@ static void php_array_replace_recursive(PointerSet &seen, bool check,
 }
 
 Variant f_array_replace(int _argc, const Variant& array1,
+                        const Variant& array2 /* = null_variant */,
                         const Array& _argv /* = null_array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   php_array_replace(ret, arr_array1);
+
+  if (UNLIKELY(_argc < 2)) return ret;
+
+  getCheckedArray(array2);
+  php_array_replace(ret, arr_array2);
+
   for (ArrayIter iter(_argv); iter; ++iter) {
     const Variant& v = iter.secondRef();
     getCheckedArray(v);
@@ -577,12 +618,20 @@ Variant f_array_replace(int _argc, const Variant& array1,
 }
 
 Variant f_array_replace_recursive(int _argc, const Variant& array1,
+                                  const Variant& array2 /* = null_variant */,
                                   const Array& _argv /* = null_array */) {
   getCheckedArray(array1);
   Array ret = Array::Create();
   PointerSet seen;
   php_array_replace_recursive(seen, false, ret, arr_array1);
   assert(seen.empty());
+
+  if (UNLIKELY(_argc < 2)) return ret;
+
+  getCheckedArray(array2);
+  php_array_replace_recursive(seen, false, ret, arr_array2);
+  assert(seen.empty());
+
   for (ArrayIter iter(_argv); iter; ++iter) {
     const Variant& v = iter.secondRef();
     getCheckedArray(v);
@@ -898,10 +947,10 @@ Variant f_array_unshift(int _argc, VRefParam array, const Variant& var, const Ar
       if (!_argv.empty()) {
         for (ssize_t pos = _argv->iter_end(); pos != ArrayData::invalid_index;
              pos = _argv->iter_rewind(pos)) {
-          vec->addFront(cvarToCell(&_argv->getValueRef(pos)));
+          vec->addFront(_argv->getValueRef(pos).asCell());
         }
       }
-      vec->addFront(cvarToCell(&var));
+      vec->addFront(var.asCell());
       return vec->size();
     }
     case Collection::SetType: {
@@ -909,10 +958,10 @@ Variant f_array_unshift(int _argc, VRefParam array, const Variant& var, const Ar
       if (!_argv.empty()) {
         for (ssize_t pos = _argv->iter_end(); pos != ArrayData::invalid_index;
              pos = _argv->iter_rewind(pos)) {
-          st->addFront(cvarToCell(&_argv->getValueRef(pos)));
+          st->addFront(_argv->getValueRef(pos).asCell());
         }
       }
-      st->addFront(cvarToCell(&var));
+      st->addFront(var.asCell());
       return st->size();
     }
     default: {
@@ -991,8 +1040,22 @@ static void compact(VarEnv* v, Array &ret, const Variant& var) {
   }
 }
 
-Array f_compact(int _argc, const Variant& varname, const Array& _argv /* = null_array */) {
-  Array ret = Array::Create();
+Array f_compact(int _argc, const Variant& varname,
+                const Array& _argv /* = null_array */) {
+  raise_disallowed_dynamic_call("compact should not be called dynamically");
+  Array ret = Array::attach(MixedArray::MakeReserve(_argv.size() + 1));
+  VarEnv* v = g_context->getVarEnv();
+  if (v) {
+    compact(v, ret, varname);
+    compact(v, ret, _argv);
+  }
+  return ret;
+}
+
+// __SystemLib\\compact_sl
+Array f_compact_sl(int _argc, const Variant& varname,
+                  const Array& _argv /* = null_array */) {
+  Array ret = Array::attach(MixedArray::MakeReserve(_argv.size() + 1));
   VarEnv* v = g_context->getVarEnv();
   if (v) {
     compact(v, ret, varname);

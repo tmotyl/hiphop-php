@@ -61,18 +61,6 @@ constexpr size_t kX64CacheLineMask = kX64CacheLineSize - 1;
 
 //////////////////////////////////////////////////////////////////////
 
-struct TraceletCounters {
-  uint64_t m_numEntered, m_numExecuted;
-};
-
-struct TraceletCountersVec {
-  int64_t m_size;
-  TraceletCounters *m_elms;
-  Mutex m_lock;
-
-  TraceletCountersVec() : m_size(0), m_elms(nullptr), m_lock() { }
-};
-
 struct FreeStubList {
   struct StubNode {
     StubNode* m_next;
@@ -83,6 +71,14 @@ struct FreeStubList {
   FreeStubList() : m_list(nullptr) {}
   TCA maybePop();
   void push(TCA stub);
+};
+
+struct PendingFixup {
+  TCA m_tca;
+  Fixup m_fixup;
+  PendingFixup() { }
+  PendingFixup(TCA tca, Fixup fixup) :
+    m_tca(tca), m_fixup(fixup) { }
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -115,6 +111,9 @@ public:
    */
   Translator& tx() { return m_tx; }
   FixupMap& fixupMap() { return m_fixupMap; }
+  void processPendingFixups();
+  void recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff);
+
   DataBlock& globalData() { return code.data(); }
   Debug::DebugInfo* getDebugInfo() { return &m_debugInfo; }
   BackEnd& backEnd() { return *m_backEnd; }
@@ -191,13 +190,12 @@ public:
   bool addDbgGuards(const Unit* unit);
   bool addDbgGuard(const Func* func, Offset offset, bool resumed);
   bool freeRequestStub(TCA stub);
-  TCA getFreeStub();
+  TCA getFreeStub(CodeBlock& stubs);
   void registerCatchBlock(CTCA ip, TCA block);
   folly::Optional<TCA> getCatchTrace(CTCA ip) const;
   TCA getTranslatedCaller() const;
   void setJmpTransID(TCA jmp);
   bool profileSrcKey(const SrcKey& sk) const;
-  bool profilePrologue(const SrcKey& sk) const;
   void getPerfCounters(Array& ret);
   bool reachedTranslationLimit(SrcKey, const SrcRec&) const;
   Translator::TranslateResult translateTracelet(Tracelet& t);
@@ -214,6 +212,12 @@ public:
    */
   std::string getUsage();
   std::string getTCAddrs();
+
+  /*
+   * Returns the total size of the TC now and at the beginning of this request,
+   * in bytes. Note that the code may have been emitted by other threads.
+   */
+  void codeEmittedThisRequest(size_t& requestEntry, size_t& now) const;
 
 public:
   CodeCache code;
@@ -247,12 +251,13 @@ private:
   /*
    * Generate code for tracelet entry
    */
-  void emitGuardChecks(SrcKey, const ChangeMap&, const RefDeps&, SrcRec&);
+  void emitGuardChecks(SrcKey, const ChangeMap&,
+    const ChangeMap&, const RefDeps&, SrcRec&);
   void emitResolvedDeps(const ChangeMap& resolvedDeps);
   void checkRefs(SrcKey, const RefDeps&, SrcRec&);
 
   bool shouldTranslate() const {
-    return code.main().used() < RuntimeOption::EvalJitAMaxUsage;
+    return code.mainUsed() < RuntimeOption::EvalJitAMaxUsage;
   }
 
   TCA getTopTranslation(SrcKey sk) {
@@ -301,6 +306,7 @@ private:
   uint64_t           m_numHHIRTrans;
   FixupMap           m_fixupMap;
   UnwindInfoHandle   m_unwindRegistrar;
+  std::vector<PendingFixup> m_pendingFixups;
   std::vector<std::pair<CTCA, TCA>> m_pendingCatchTraces;
   CatchTraceMap      m_catchTraceMap;
   std::vector<TransBCMapping> m_bcMap;

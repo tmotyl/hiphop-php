@@ -43,15 +43,24 @@ void emitStoreRetIntoActRec(vixl::MacroAssembler& a) {
 //////////////////////////////////////////////////////////////////////
 
 TCA emitCall(vixl::MacroAssembler& a, CppCall call) {
-  if (call.isDirect()) {
-    a. Mov  (rHostCallReg, reinterpret_cast<intptr_t>(call.getAddress()));
-  } else if (call.isVirtual()) {
+  switch (call.kind()) {
+  case CppCall::Kind::Direct:
+    a. Mov  (rHostCallReg, reinterpret_cast<intptr_t>(call.address()));
+    break;
+  case CppCall::Kind::Virtual:
     a. Ldr  (rHostCallReg, argReg(0)[0]);
-    a. Ldr  (rHostCallReg, rHostCallReg[call.getOffset()]);
-  } else {
+    a. Ldr  (rHostCallReg, rHostCallReg[call.vtableOffset()]);
+    break;
+  case CppCall::Kind::Indirect:
     // call indirect currently not implemented. It'll be somthing like
     // a.Br(x2a(call.getReg()))
     not_implemented();
+    always_assert(0);
+    break;
+  case CppCall::Kind::ArrayVirt:
+    not_implemented();
+    always_assert(0);
+    break;
   }
 
   using namespace vixl;
@@ -68,7 +77,7 @@ TCA emitCall(vixl::MacroAssembler& a, CppCall call) {
 }
 
 TCA emitCallWithinTC(vixl::MacroAssembler& a, TCA call) {
-  a. Mov  (rHostCallReg, reinterpret_cast<intptr_t>(call));
+  a.   Mov     (rHostCallReg, reinterpret_cast<intptr_t>(call));
 
   a.   Blr     (rHostCallReg);
   auto fixupAddr = a.frontier();
@@ -110,7 +119,6 @@ void emitTestSurpriseFlags(vixl::MacroAssembler& a) {
 }
 
 void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& stubsCode,
-                                 bool inTracelet, JIT::FixupMap& fixupMap,
                                  JIT::Fixup fixup) {
   vixl::MacroAssembler a { mainCode };
   vixl::MacroAssembler astubs { stubsCode };
@@ -122,15 +130,7 @@ void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& stubsCode,
 
   auto fixupAddr =
     emitCallWithinTC(astubs, tx->uniqueStubs.functionEnterHelper);
-  if (inTracelet) {
-    fixupMap.recordSyncPoint(fixupAddr,
-                             fixup.m_pcOffset, fixup.m_spOffset);
-  } else {
-    // If we're being called while generating a func prologue, we
-    // have to record the fixup directly in the fixup map instead of
-    // going through the pending fixup path like normal.
-    fixupMap.recordFixup(fixupAddr, fixup);
-  }
+  mcg->recordSyncPoint(fixupAddr, fixup.m_pcOffset, fixup.m_spOffset);
   mcg->backEnd().emitSmashableJump(stubsCode, mainCode.frontier(), CC_None);
 }
 

@@ -75,7 +75,7 @@ static inline void sxe_add_namespace_name(Array& ret, xmlNsPtr ns) {
 static void sxe_add_registered_namespaces(c_SimpleXMLElement* sxe,
                                           xmlNodePtr node, bool recursive,
                                           Array& return_value) {
-  if (node->type == XML_ELEMENT_NODE) {
+  if (node != nullptr && node->type == XML_ELEMENT_NODE) {
     xmlNsPtr ns = node->nsDef;
     while (ns != nullptr) {
       sxe_add_namespace_name(return_value, ns);
@@ -1652,15 +1652,11 @@ c_SimpleXMLElementIterator::c_SimpleXMLElementIterator(Class* cb) :
     ExtObjectData(cb), sxe(nullptr) {
 }
 
-void c_SimpleXMLElementIterator::sweep() {
+c_SimpleXMLElementIterator::~c_SimpleXMLElementIterator() {
   if (sxe) {
     sxe->decRefCount();
     sxe = nullptr;
   }
-}
-
-c_SimpleXMLElementIterator::~c_SimpleXMLElementIterator() {
-  c_SimpleXMLElementIterator::sweep();
 }
 
 void c_SimpleXMLElementIterator::t___construct() {
@@ -1717,14 +1713,19 @@ hphp_libxml_input_buffer(const char *URI, xmlCharEncoding enc);
 class xmlErrorVec : public std::vector<xmlError> {
 public:
   ~xmlErrorVec() {
-    reset();
+    clearErrors();
   }
 
   void reset() {
+    clearErrors();
+    xmlErrorVec().swap(*this);
+  }
+
+private:
+  void clearErrors() {
     for (int64_t i = 0; i < size(); i++) {
       xmlResetError(&at(i));
     }
-    clear();
   }
 };
 

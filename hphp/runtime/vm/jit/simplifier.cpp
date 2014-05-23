@@ -26,6 +26,7 @@
 #include "hphp/runtime/vm/jit/ir-builder.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/util/overflow.h"
 
 namespace HPHP {
@@ -118,9 +119,12 @@ StackValueInfo getStackValue(SSATmp* sp, uint32_t index) {
       return StackValueInfo { inst, Type::Gen };
     }
     auto info =
-      getStackValue(inst->src(0),
-                    index -
-                    (1 /* pushed */ - kNumActRecCells /* popped */));
+      getStackValue(
+        inst->src(0),
+        index - (1 /* pushed */ -
+                 (kNumActRecCells +
+                   inst->extra<Call>()->numParams) /* popped */)
+      );
     info.spansCall = true;
     return info;
   }
@@ -259,7 +263,15 @@ SSATmp* canonical(SSATmp* value) {
 IRInstruction* findSpillFrame(SSATmp* sp) {
   auto inst = sp->inst();
   while (!inst->is(SpillFrame)) {
-    assert(inst->dst()->isA(Type::StkPtr));
+    if (debug) {
+      [&] {
+        for (auto const& dst : inst->dsts()) {
+          if (dst.isA(Type::StkPtr)) return;
+        }
+        assert(false);
+      }();
+    }
+
     assert(!inst->is(RetAdjustStack));
     if (inst->is(DefSP)) return nullptr;
     if (inst->is(InterpOne) && isFPush(inst->extra<InterpOne>()->opcode)) {
@@ -418,9 +430,9 @@ SSATmp* Simplifier::simplifyWork(const IRInstruction* inst) {
     case ConvCellToStr: return simplifyConvCellToStr(inst);
     case ConvCellToInt: return simplifyConvCellToInt(inst);
     case ConvCellToDbl: return simplifyConvCellToDbl(inst);
+    case ConvObjToBool: return simplifyConvObjToBool(inst);
     case Floor:         return simplifyFloor(inst);
     case Ceil:          return simplifyCeil(inst);
-    case Unbox:         return simplifyUnbox(inst);
     case UnboxPtr:      return simplifyUnboxPtr(inst);
     case BoxPtr:        return simplifyBoxPtr(inst);
     case IsType:
@@ -473,6 +485,9 @@ SSATmp* Simplifier::simplifyWork(const IRInstruction* inst) {
 
     case CheckPackedArrayBounds: return simplifyCheckPackedArrayBounds(inst);
     case LdPackedArrayElem:      return simplifyLdPackedArrayElem(inst);
+    case IsWaitHandle:           return simplifyIsWaitHandle(inst);
+
+    case CallBuiltin: return simplifyCallBuiltin(inst);
 
     default:
       return nullptr;
@@ -968,6 +983,11 @@ SSATmp* Simplifier::simplifyXorTrue(SSATmp* src) {
   case XorBool:
     if (inst->src(1)->isConst(true)) return inst->src(0);
     return nullptr;
+
+  case ColIsNEmpty:
+    return gen(ColIsEmpty, inst->src(0));
+  case ColIsEmpty:
+    return gen(ColIsNEmpty, inst->src(0));
 
   // !(X cmp Y) --> X opposite_cmp Y
   case Lt:
@@ -1593,11 +1613,15 @@ SSATmp* Simplifier::simplifyConvCellToBool(const IRInstruction* inst) {
   if (srcType <= Type::Str)  return gen(ConvStrToBool, src);
   if (srcType <= Type::Obj) {
     if (auto cls = srcType.getClass()) {
-      // t3429711 we should test cls->m_ODAttr
-      // here, but currently it doesnt have all
-      // the flags set.
-      if (!cls->instanceCtor()) {
-        return cns(true);
+      // We need to exclude interfaces like ConstSet.  For now, just
+      // skip anything that's an interface.
+      if (!(cls->attrs() & AttrInterface)) {
+        // t3429711 we should test cls->m_ODAttr
+        // here, but currently it doesnt have all
+        // the flags set.
+        if (!cls->instanceCtor()) {
+          return cns(true);
+        }
       }
     }
     return gen(ConvObjToBool, src);
@@ -1663,6 +1687,14 @@ SSATmp* Simplifier::simplifyConvCellToDbl(const IRInstruction* inst) {
   return nullptr;
 }
 
+SSATmp* Simplifier::simplifyConvObjToBool(const IRInstruction* inst) {
+  auto const ty = inst->src(0)->type();
+  if (ty < Type::Obj && ty.getClass() && ty.getClass()->isCollectionClass()) {
+    return gen(ColIsNEmpty, inst->src(0));
+  }
+  return nullptr;
+}
+
 template<class Oper>
 SSATmp* Simplifier::simplifyRoundCommon(const IRInstruction* inst, Oper op) {
   auto const src  = inst->src(0);
@@ -1685,23 +1717,6 @@ SSATmp* Simplifier::simplifyFloor(const IRInstruction* inst) {
 
 SSATmp* Simplifier::simplifyCeil(const IRInstruction* inst) {
   return simplifyRoundCommon(inst, ceil);
-}
-
-SSATmp* Simplifier::simplifyUnbox(const IRInstruction* inst) {
-  auto* src = inst->src(0);
-  auto type = outputType(inst);
-
-  Type srcType = src->type();
-  if (srcType.notBoxed()) {
-    assert(type.equals(srcType));
-    return src;
-  }
-  if (srcType.isBoxed()) {
-    srcType = srcType.innerType();
-    assert(type.equals(srcType));
-    return gen(LdRef, type, inst->taken(), src);
-  }
-  return nullptr;
 }
 
 SSATmp* Simplifier::simplifyUnboxPtr(const IRInstruction* inst) {
@@ -1963,21 +1978,38 @@ SSATmp* Simplifier::simplifyAssertNonNull(const IRInstruction* inst) {
 }
 
 SSATmp* Simplifier::simplifyCheckPackedArrayBounds(const IRInstruction* inst) {
-  auto* array = inst->src(0);
-  auto* idx = inst->src(1);
+  auto const array = inst->src(0);
+  auto const idx   = inst->src(1);
+  if (!idx->isConst()) return nullptr;
 
-  if (idx->isConst()) {
-    auto const idxVal = (uint64_t)idx->intVal();
-    if (idxVal >= 0xffffffffull) {
-      // ArrayData can't hold more than 2^32 - 1 elements, so this is always
-      // going to fail.
+  auto const idxVal = (uint64_t)idx->intVal();
+  if (idxVal >= 0xffffffffull) {
+    // ArrayData can't hold more than 2^32 - 1 elements, so this is
+    // always going to fail.
+    return gen(Jmp, inst->taken());
+  }
+
+  if (array->isConst()) {
+    if (idxVal >= array->arrVal()->size()) {
       return gen(Jmp, inst->taken());
-    } else if (array->isConst()) {
-      if (idxVal >= array->arrVal()->size()) {
-        return gen(Jmp, inst->taken());
-      } else {
-        // We should convert inst to a nop here but that exposes t3626113
+    } else {
+      return gen(Nop);
+    }
+  }
+
+  if (auto const at = array->type().getArrayType()) {
+    using A = RepoAuthType::Array;
+    switch (at->tag()) {
+    case A::Tag::Packed:
+      if (idxVal < at->size() && at->emptiness() == A::Empty::No) {
+        return gen(Nop);
       }
+      break;
+    case A::Tag::PackedN:
+      if (idxVal == 0 && at->emptiness() == A::Empty::No) {
+        return gen(Nop);
+      }
+      break;
     }
   }
 
@@ -1998,6 +2030,40 @@ SSATmp* Simplifier::simplifyLdPackedArrayElem(const IRInstruction* inst) {
     return cns(*value);
   }
 
+  return nullptr;
+}
+
+const StaticString s_isEmpty("isEmpty");
+
+SSATmp* Simplifier::simplifyCallBuiltin(const IRInstruction* inst) {
+  auto const callee = inst->extra<CallBuiltin>()->callee;
+  auto const args = inst->srcs();
+
+  bool const arg0Collection = args.size() >= 1 &&
+                              args[0]->type() < Type::Obj &&
+                              args[0]->type().getClass() &&
+                              args[0]->type().getClass()->isCollectionClass();
+
+  switch (args.size()) {
+  case 1:
+    if (arg0Collection && callee->name()->isame(s_isEmpty.get())) {
+      return gen(ColIsEmpty, args[0]);
+    }
+    break;
+  default:
+    break;
+  }
+
+  return nullptr;
+}
+
+SSATmp* Simplifier::simplifyIsWaitHandle(const IRInstruction* inst) {
+  if (inst->src(0)->type() < Type::Obj) {
+    auto const cls = inst->src(0)->type().getClass();
+    if (cls && cls->classof(c_WaitHandle::classof())) {
+      return cns(true);
+    }
+  }
   return nullptr;
 }
 

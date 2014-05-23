@@ -268,7 +268,7 @@ void c_XSLTProcessor::t___construct() {
 
 Variant c_XSLTProcessor::t_getparameter(const String& namespaceURI,
                                         const String& localName) {
-  // namespaceURI argument is unused in Zend PHP XSL extension.
+  // namespaceURI argument is unused in PHP5 XSL extension.
   if (m_params.exists(localName)) {
     assert(m_params[localName].isString());
     return m_params[localName].toString();
@@ -319,7 +319,7 @@ void c_XSLTProcessor::t_importstylesheet(const Object& stylesheet) {
 
 bool c_XSLTProcessor::t_removeparameter(const String& namespaceURI,
                                         const String& localName) {
-  // namespaceURI argument is unused in Zend PHP XSL extension.
+  // namespaceURI argument is unused in PHP5 XSL extension.
   if (m_params.exists(localName)) {
     assert(m_params[localName].isString());
     m_params.remove(localName);
@@ -358,7 +358,7 @@ void c_XSLTProcessor::t_registerphpfunctions(
 bool c_XSLTProcessor::t_setparameter(const String& namespaceURI,
                                      const Variant& localName,
                                      const Variant& value /*=null_variant */) {
-  // namespaceURI argument is unused in Zend PHP XSL extension.
+  // namespaceURI argument is unused in PHP5 XSL extension.
   if (localName.isString() && value.isString()) {
     if (m_params.exists(localName)) {
       m_params.set(localName, value);
@@ -408,6 +408,7 @@ bool c_XSLTProcessor::t_setprofiling(const String& filename) {
   if (filename.length() > 0) {
     String translated = File::TranslatePath(filename);
     Stream::Wrapper* w = Stream::getWrapperFromURI(translated);
+    if (!w) return false;
     if (w->access(translated, W_OK)) {
       m_profile = translated;
       return true;

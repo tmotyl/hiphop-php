@@ -16,8 +16,9 @@
 #ifndef incl_HPHP_VM_RUNTIME_H_
 #define incl_HPHP_VM_RUNTIME_H_
 
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/resumable.h"
@@ -39,6 +40,9 @@ ObjectData* newPairHelper();
 StringData* concat_is(int64_t v1, StringData* v2);
 StringData* concat_si(StringData* v1, int64_t v2);
 StringData* concat_ss(StringData* v1, StringData* v2);
+StringData* concat_s3(StringData* v1, StringData* v2, StringData* v3);
+StringData* concat_s4(StringData* v1, StringData* v2,
+                      StringData* v3, StringData* v4);
 
 void print_string(StringData* s);
 void print_int(int64_t i);
@@ -82,12 +86,12 @@ frame_afwh(const ActRec* fp) {
   return waitHandle;
 }
 
-inline c_Continuation*
-frame_continuation(const ActRec* fp) {
+inline c_Generator*
+frame_generator(const ActRec* fp) {
   auto resumable = frame_resumable(fp);
-  auto obj = (ObjectData*)((char*)resumable - c_Continuation::resumableOff());
-  assert(obj->getVMClass() == c_Continuation::classof());
-  return static_cast<c_Continuation*>(obj);
+  auto obj = (ObjectData*)((char*)resumable - c_Generator::resumableOff());
+  assert(obj->getVMClass() == c_Generator::classof());
+  return static_cast<c_Generator*>(obj);
 }
 
 /*
@@ -229,7 +233,7 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
  * be set up before you use those parts of the runtime.
  */
 
-typedef String (*CompileStringAST)(String, String);
+typedef StringData* (*CompileStringAST)(String, String);
 typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
 typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
@@ -262,6 +266,9 @@ bool interface_supports_array(std::string const&);
 bool interface_supports_string(std::string const&);
 bool interface_supports_int(std::string const&);
 bool interface_supports_double(std::string const&);
+
+int64_t zero_error_level();
+void restore_error_level(int64_t oldLevel);
 
 }
 #endif

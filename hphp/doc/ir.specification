@@ -649,8 +649,8 @@ JmpNInstanceOfBitmask
   Fused jump instructions. These all operate exactly as their corresponding
   query op, but also take a label to jump to when the condition is true.
 
-D:None = JmpZero S0:{Bool|Int} L:Label
-D:None = JmpNZero S0:{Bool|Int} L:Label
+JmpZero S0:{Bool|Int} L:Label
+JmpNZero S0:{Bool|Int} L:Label
 
   Conditionally jump to L based on S0.
 
@@ -754,6 +754,12 @@ D:T = LdLoc<T,localId> S0:FramePtr
 
   Loads local slot localId from the frame S0 and puts the value in D as type T.
 
+D:T = LdGbl<T,localId> S0:FramePtr -> B
+
+  Loads local number localId from frame S0 and puts the value in D if the
+  local's type is a subtype of T. If the local's type is not a subtype of T,
+  then the load does not happen, and this instruction branches to B.
+
 D:PtrToGen = LdStackAddr<offset> S0:StkPtr
 
   Loads the address of the stack slot given by the pointer in S0 at the offset
@@ -834,8 +840,8 @@ D:ConstT = DefConst<T>
 
 D:T = Conjure<T>
 
-  Define a value of type T. This is meant to be used in tests, to create a
-  non-constant value as an opaque input to other instructions.
+  Define a value of type T. This instruction aborts at runtime; it is meant to
+  be used in tests or code that is known to be unreachable.
 
 D:Cls = LdCls S0:Str S1:ConstCls
 
@@ -995,13 +1001,15 @@ D:PtrToGen = LdClsPropAddrOrRaise S0:Cls S1:Str S2:ConstCls
   accessing the property. If class S0 does not have a visible and accessible
   static property named S1, throw a fatal error.
 
-LdObjMethod S0:Cls S1:ConstStr S2:StkPtr S3:Cls
+LdObjMethod<methodName,fatal> S0:Cls S1:StkPtr
 
   Stores a pointer to an object's method into an activation record. S0 points
-  to the object's class, S1 is the method name, S2 points to the activation
-  record, and S3, a compile time constant, points to the current context class.
-  Caches the mapping in the target cache. Fatals if the class does not have
-  an accessible method with the given name and does not have a __call method.
+  to the object's class, S1 points to the pre-live activation record.  Caches
+  the mapping in the target cache. If `fatal' is true, raises a fatal if the
+  class does not have an accessible method with the given name and does not
+  have a __call method; otherwise (if `fatal' is false), raises a warning and
+  puts func that does nothing and returns null (SystemLib::s_nullFunc) on the
+  activation record.
 
 D:Func = LdObjInvoke S0:Cls -> B
 
@@ -1097,17 +1105,6 @@ D:Obj = CustomInstanceInit S0:Obj
 
   Call the custom instance initializer of object S0.
 
-D:Obj = AllocObjFast<class>
-
-  Allocate a new object of the specified class, which must be persistent and
-  able to be instantiated (i.e., S1 is not an abstract class, interface, or
-  trait). The class' constructor is also assumed to be accessible in the
-  current context.
-
-  This instruction does not handle adding the object to the global destructor
-  list, so currently is not used when RuntimeOption::EnableObjDestructCall is
-  true.
-
 D:Arr = NewArray S0:ConstInt
 
   Allocate a new array with the expected capacity S0.
@@ -1137,15 +1134,15 @@ D:Obj = Clone S0:Obj
 
 
 D:StkPtr = SpillFrame<numArgs,invName> S0:StkPtr
-                                       S1:{Func|InitNull}
-                                       S2:{Ctx|Class|InitNull}
+                                       S1:{Func|Nullptr}
+                                       S2:{Ctx|Class|Nullptr}
 
   Operands:
 
      S0 - caller stack pointer
-     S1 - callee Func or null
-     S2 - object (for FPushObjMethod*), class (for FPushClsMethod*), or null
-          (for FPushFunc*).
+     S1 - callee Func or nullptr
+     S2 - object (for FPushObjMethod*), class (for FPushClsMethod*), context
+          (for FPushClsMethodF), or nullptr (for FPushFunc*).
 
   Defines the fields for an activation record and writes them to the stack
   pointed to by S1.
@@ -1197,23 +1194,20 @@ D:StkPtr = CallArray S0:StkPtr
   arguments is pushed. CallArray pops the array off the stack, pushes the
   elements of the array as arguments, and invokes the function in the ActRec.
 
-D:StkPtr = Call S0:StkPtr S1:FramePtr S2:ConstInt S3:Func S4...
+D:StkPtr = Call<numParams,returnOff,funcd,destroyLocals> S0:StkPtr S1:FramePtr
 
-  Invoke the function S3 with ActRec S0 and variadic arguments S4...
-  representing values to pass to the function. A value of type None means the
-  value to be passed is already on the stack. S1 is the caller FP and S2 is
-  the bytecode offset of the next instruction to execute when the call returns.
+  Transfer control to a callee, based on the pre-live activation record and set
+  of args on the stack pointed to by S0. S1 is the current caller frame
+  pointer. The `funcd' in the extra data is a Func* for the callee if we know
+  the callee statically.
 
 NativeImpl = S0:ConstFunc S1:FramePtr
 
   Execute a call to the native builtin specified by the func in S0.
 
-D:T = CallBuiltin<T> S0:FuncPtr S1:StkPtr S2...SN
+D:T = CallBuiltin<T> S0...SN-1
 
-  Call builtin function with N-1 arguments. Operands:
-
-    S0: callee Func
-    S1..SN: arguments to builtin function
+  Call builtin function with N arguments.
 
   The source and destination types correspond to C++ parameter and return types
   as follows:
@@ -1280,6 +1274,10 @@ StProp S0:Obj S1:Int S2:Gen
 
   Store S2 into the location S0 + S1 (in bytes).
 
+StCell<offset> S0:PtrToGen S1:Gen
+
+  Store S1 into the location S0 + offset (in bytes).
+
 StElem S0:PtrToCell S1:Int S2:Cell
 
   Store S2 into the location given by the index S1 from base pointer S0. The
@@ -1293,6 +1291,12 @@ StLocNT<localId> S0:FramePtr S1:Gen
 
   Store S1 to local number localId on the frame pointed to by S0, without
   storing the type.
+
+StGbl<localId> S0:FramePtr S1:Gen
+
+  Behaves just like StLoc, except the hard requirement that it is only emitted
+  for globals. We don't optimize StGbl the same way as StLoc, as we need
+  intraprocedural analysis to know whether the store is truly dead.
 
 D:BoxedCell = StRef S0:BoxedCell S1:Cell
 
@@ -1335,6 +1339,11 @@ SyncABIRegs S0:FramePtr S1:StkPtr
 
   In practice this instruction currently doesn't do anything except act as an
   essential instruction that prevents the current stack from being dce'd.
+
+EagerSyncVMRegs S0:FramePtr S1:StkPtr
+
+  Modify the vm register state for m_fp and m_sp in ExecutionContext to match
+  S0 and S1.
 
 ReqBindJmp<bcOff>
 
@@ -1417,9 +1426,10 @@ TrackLoc<localId> S0:T
   is used by the translator to track values that are stored in locals. It can
   be thought of as a store (which does not physically store anything).
 
-D:T* = LdAddr S0:T* S1:ConstInt
+D:T* = LdMIStateAddr S0:T* S1:ConstInt
 
-  Load address. Returns a pointer to (S0 + S1) with the same type as S0.
+  Load an MInstrState address. Returns a pointer to (S0 + S1) with the same
+  type as S0. S0 must be the output of a DefMIStateBase.
 
 IncRef S0:Gen
 
@@ -1476,7 +1486,7 @@ D:StkPtr = DefSP<stackOff> S0:StkPtr
 
   Creates a temporary D representing the current vm stack pointer. S0 is a
   pointer to the current frame. The 'stackOff' is the logical offset between S0
-  and the stack pointer, but in the case of continuations this is not the
+  and the stack pointer, but in the case of generators this is not the
   physical offset at runtime.
 
   This instruction is used at the beginning of tracelets to represent the state
@@ -1636,6 +1646,14 @@ D:Str = ConcatCellCell S0:Cell S1:Cell
   Concatenate S0 and S1 after converting them to strings in a way that obeys
   php semantics. (Calling object __toString methods, etc.)
 
+D:Str = ConcatStr3 S0:Str S1:Str S2:Str
+
+  Concatenate S0, S1, and S2.
+
+D:Str = ConcatStr4 S0:Str S1:Str S2:Str S3:Str
+
+  Concatenate S0, S1, S2, and S3.
+
 D:Arr = AddElemStrKey S0:Arr S1:Str S2:Cell
 
   Add S2 to the array S0 for the key S1, and return the resulting array.
@@ -1644,9 +1662,12 @@ D:Arr = AddElemIntKey S0:Arr S1:Int S2:Cell
 
   Add S2 to the array S0 for the key S1, and return the resulting array.
 
-D:Arr = AddNewElem S0:Arr S1:Gen
+D:Arr = AddNewElem S0:Arr S1:Cell
 
-  Add S1 as a new element to the array S0. TODO(#2437059): this is broken.
+  Add S1 as a new element to the array S0.  (Note: S1 must actually be a
+  subtype of InitCell for array invariants, but we can't assert this yet in the
+  IR because many eval stack slots are not entirely typed wrt initness right
+  now.)
 
 D:Arr = ArrayAdd S0:Arr S1:Arr
 
@@ -1689,11 +1710,11 @@ D:StkPtr InterpOne<T, bcOff, numPopped, numPushed> S0:StkPtr S1:FramePtr
 
   Call the interpreter implementation function for one opcode. S0 and S1 are,
   respectively, the VM stack and frame pointers before this instruction. T is
-  the type of the top stack element after the call, or None if it pushes
-  nothing. bcOff is the bytecode offset. numPopped is the number of stack cells
-  consumed by the instruction, and numPushed is the number of stack cells
-  produced by the instruction. This instruction returns the updated VM stack
-  pointer.
+  only present if the instruction pushes to the stack, in which case it is the
+  type of the top stack element after the call. `bcOff' is the bytecode
+  offset. `numPopped' is the number of stack cells consumed by the instruction,
+  and `numPushed' is the number of stack cells produced by the
+  instruction. This instruction returns the updated VM stack pointer.
 
 D:StkPtr InterpOneCF<T, bcOff, numPopped, numPushed> S0:StkPtr S1:FramePtr
 
@@ -1703,6 +1724,16 @@ D:Bool = ThingExists<class|interface|trait> S0:Str
 
   Returns a bool indicating whether the class, interface, or trait named by S0
   exists. Invokes autoload if it doesn't exist.
+
+D:Int = GetErrorLevel
+
+  Returns the current error reporting level (equivalent to calling
+  error_reporting() in PHP).
+
+D:Int = SetErrorLevel S0:Int
+
+  Sets the current error reporting level, and returns the previous one.
+  Equivalent to calling error_reporting(S0) in PHP.
 
 
 15. Register allocation
@@ -1719,7 +1750,7 @@ Shuffle<d...> S...
   hold different variables at different positions.
 
 
-16. Continuations & Closures
+16. Generators & Closures
 
 
 D:Obj = CreateCl S0:ConstCls S1:ConstInt S2:FramePtr S3:StkPtr
@@ -1744,9 +1775,9 @@ StClosureArg<offsetBytes> S0:Obj<Closure> S1:Gen
   Store one of the closure environment arguments (i.e. from the closure's use
   clause) from S1 into the closure object S0.
 
-D:Obj<Continuation> = CreateCont S0:FramePtr S1:{TCA,Nullptr} S2:Int
+D:Obj<Generator> = CreateCont S0:FramePtr S1:{TCA,Nullptr} S2:Int
 
-  Create a Continuation object and suspend the ActRec provided by S0 into
+  Create a Generator object and suspend the ActRec provided by S0 into
   its embedded ActRec. Set the native resume address to S1 and resume offset
   to S2.
 
@@ -1761,66 +1792,66 @@ ContEnter S0:StkPtr S1:FramePtr S2:FramePtr S3:TCA S4:ConstInt
 
   Enters a generator body. S0 is the current stack pointer pointing to fully
   spilled stack, S1 is the current frame pointer, S2 is the generator frame
-  pointer embedded in the Continuation object, S3 is the address to jump to,
+  pointer embedded in the Generator object, S3 is the address to jump to,
   and S4 is the bytecode offset in the caller to return to when the generator
   suspends or returns.
 
 ContPreNext S0:Obj S1:Bool -> B
 
-  Performs operations needed for the next() method of Continuation object S0.
+  Performs operations needed for the next() method of Generator object S0.
   If the generator is already running or finished, or it was not started yet
   and the S1 check-started flag is set, the branch B is taken. Otherwise,
   the generator is marked as running.
 
 ContStartedCheck S0:Obj -> B
 
-  Checks if the continuation object S0 has started, and if not branches to
+  Checks if the Generator object S0 has started, and if not branches to
   block B.
 
 ContArIncKey S0:FramePtr
 
-  Special-case key update for continuation, ActRec of which is S0, which
-  increments the key of a continuation if that continuation's key is an Int.
-  This will cause undefined behavior if the continuation's key is not an Int.
+  Special-case key update for generator, ActRec of which is S0, which
+  increments the key of a generator if that generator's key is an Int.
+  This will cause undefined behavior if the generator's key is not an Int.
 
 ContArUpdateIdx S0:FramePtr S1:Int
 
-  Updates the internal index of continuation with S1 if necessary, i.e. if S1
+  Updates the internal index of generator with S1 if necessary, i.e. if S1
   is larger than the index. S0 is the pointer to the embedded ActRec.
 
 D:FramePtr LdContActRec S0:PtrToGen
 
-  Loads the Continuation object's ActRec, given a pointer to the continuation
+  Loads the Generator object's ActRec, given a pointer to the generator
   object in S0.
 
 D:T LdContArRaw<T> S0:FramePtr S1:ConstInt
 
-  Loads raw data from the Continuation object ActRec of which is S0. S1 is a
+  Loads raw data from the Generator object ActRec of which is S0. S1 is a
   constant from the RawMemSlot::Kind enum, which describes the offset from the
-  continuation base, and the size.
+  generator base, and the size.
 
 StContArRaw S0:FramePtr S1:ConstInt S2:{Int,TCA,Nullptr}
 
-  Stores raw data into the Continuation object ActRec of which is S0. S1 is a
+  Stores raw data into the Generator object ActRec of which is S0. S1 is a
   constant from the RawMemSlow::Kind enum, which describes the offset from the
-  Continuation base, and the size. S2 is the value.
+  Generator base, and the size. S2 is the value.
 
 D:Cell LdContArValue S0:FramePtr
 
-  Loads 'value' from the Continuation object ActRec of which is S0.
+  Loads 'value' from the Generator object ActRec of which is S0.
 
 StContArValue S0:FramePtr S1:Cell
 
-  Stores 'value' into the Continuation object ActRec of which is S0. S1 is the
+  Stores 'value' into the Generator object ActRec of which is S0. S1 is the
   new value.
 
 D:Cell LdContArKey S0:FramePtr
 
-  Loads 'key' from the Continuation object ActRec of which is S0.
+  Loads 'key' from the Generator object ActRec of which is S0.
 
 StContArKey S0:FramePtr S1:Cell
 
-  Stores 'key' into the Continuation object ActRec of which is S0. S1 is the
+  Stores 'key' into the Generator object ActRec of which is S0. S1 is the
   new value.
 
 StAsyncArRaw S0:FramePtr S1:ConstInt S2:{Int,Obj,TCA,Nullptr}
@@ -1844,6 +1875,10 @@ D:Cell = LdWHResult S0:Obj
 
   Loads the result of the WaitHandle in S0. This instruction has undefined
   behavior if S0 is not a WaitHandle, or if S0 is not finished.
+
+CopyCells<numCells> S0:FramePtr S1:PtrToGen
+
+  Copy numCells cells from frame S0 to the same slot offsets in S1.
 
 
 17. Debugging, instrumentation, and profiling
@@ -1967,11 +2002,6 @@ CIterFree<IterId> S0:FramePtr
 
   Free the iterator variable whose index is given by IterId in the stack frame
   pointed to by S0.
-
-IterCopy S0:FramePtr S1:ConstInt S2:PtrToGen S3:ConstInt
-
-  Copy iterator from stack frame S0 at offset S1 to the continuation frame
-  given by S2 at offset S3. Used for copying iterators in CreateAsync.
 
 
 19. Member instruction support
@@ -2238,6 +2268,14 @@ CheckBounds S0:Int S1:Int
   Checks that the index in S0 is between 0 (included) and the values in S1
   (excluded). Throws if out of bounds.
 
+ProfileArray S0:Arr
+
+  Profile type of array S0 (i.e. whether it is packed or mixed).
+
+ProfileStr<key> S0:PtrToStr
+
+  Profile exact type of the value pointed to by S0.
+
 CheckPackedArrayBounds S0:Arr S1:Int -> B
 
   Checks that the index in S1 is within the bounds of the packed array in S0.
@@ -2275,6 +2313,12 @@ D:Obj = ColAddElemC S0:Obj S1:Cell S2:Cell
 
   Adds item to collection. Inserts item S2 into collection S0 at key S1.
   Throws a fatal error if S0 is not a collection. Returns S0.
+
+D:Bool = ColIsEmpty S0:Obj
+D:Bool = ColIsNEmpty S0:Obj
+
+  Returns whether a collection instance is empty or not.  S0 must be known to
+  be an instance of a collection class at compile time.
 
 20. Exception/unwinding support
 

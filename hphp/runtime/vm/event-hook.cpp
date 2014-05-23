@@ -267,7 +267,7 @@ bool EventHook::onFunctionEnter(const ActRec* ar, int funcType) {
   return true;
 }
 
-void EventHook::onFunctionExit(const ActRec* ar, TypedValue* retval) {
+void EventHook::onFunctionExit(ActRec* ar, TypedValue* retval) {
   auto const inlinedRip = JIT::tx->uniqueStubs.retInlHelper;
   if ((JIT::TCA)ar->m_savedRip == inlinedRip) {
     // Inlined calls normally skip the function enter and exit events. If we

@@ -49,14 +49,13 @@ class c_SetResultToRefWaitHandle : public c_BlockableWaitHandle {
 
 
  public:
-  String getName();
-
- protected:
   void onUnblocked();
+  String getName();
   c_WaitableWaitHandle* getChild();
   void enterContextImpl(context_idx_t ctx_idx);
 
  private:
+  void setState(uint8_t state) { setKindState(Kind::SetResultToRef, state); }
   void initialize(c_WaitableWaitHandle* wait_handle, RefData* ref);
   void markAsSucceeded(const Cell& result);
   void markAsFailed(const Object& exception);

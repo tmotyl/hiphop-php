@@ -64,6 +64,7 @@ ExecutionContext::ExecutionContext()
   , m_protectedLevel(0)
   , m_stdout(nullptr)
   , m_stdoutData(nullptr)
+  , m_stdoutBytesWritten(0)
   , m_errorState(ExecutionContext::ErrorState::NoError)
   , m_lastErrorNum(0)
   , m_throwAllErrors(false)
@@ -201,9 +202,14 @@ void ExecutionContext::writeStdout(const char *s, int len) {
     } else {
       safe_stdout(s, len);
     }
+    m_stdoutBytesWritten += len;
   } else {
     m_stdout(s, len, m_stdoutData);
   }
+}
+
+size_t ExecutionContext::getStdoutBytesWritten() const {
+  return m_stdoutBytesWritten;
 }
 
 void ExecutionContext::write(const char *s, int len) {
@@ -341,7 +347,6 @@ const StaticString
 Array ExecutionContext::obGetStatus(bool full) {
   Array ret = Array::Create();
   std::list<OutputBuffer*>::const_iterator iter = m_buffers.begin();
-  ++iter; // skip over the fake outermost buffer
   int level = 0;
   for (; iter != m_buffers.end(); ++iter, ++level) {
     Array status;
@@ -753,9 +758,9 @@ void ExecutionContext::debuggerInfo(
     std::vector<std::pair<const char*,std::string>>& info) {
   int64_t newInt = convert_bytes_to_long(IniSetting::Get("memory_limit"));
   if (newInt <= 0) {
-    newInt = INT64_MAX;
+    newInt = std::numeric_limits<int64_t>::max();
   }
-  if (newInt == INT64_MAX) {
+  if (newInt == std::numeric_limits<int64_t>::max()) {
     info.emplace_back("Max Memory", "(unlimited)");
   } else {
     info.emplace_back("Max Memory", IDebuggable::FormatSize(newInt));
@@ -769,6 +774,10 @@ void ExecutionContext::debuggerInfo(
 
 void ExecutionContext::setenv(const String& name, const String& value) {
   m_envs.set(name, value);
+}
+
+void ExecutionContext::unsetenv(const String& name) {
+  m_envs.remove(name);
 }
 
 String ExecutionContext::getenv(const String& name) const {

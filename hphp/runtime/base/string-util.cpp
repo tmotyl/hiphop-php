@@ -33,19 +33,15 @@ String StringUtil::Pad(const String& input, int final_length,
                        const String& pad_string /* = " " */,
                        PadType type /* = PadType::Right */) {
   int len = input.size();
-  char *ret = string_pad(input.data(), len, final_length, pad_string.data(),
-                         pad_string.size(), static_cast<int>(type));
-  if (ret) return String(ret, len, AttachString);
-  return String();
+  return string_pad(input.data(), len, final_length, pad_string.data(),
+                    pad_string.size(), static_cast<int>(type));
 }
 
 String StringUtil::StripHTMLTags(const String& input,
                                  const String& allowable_tags /* = "" */) {
   if (input.empty()) return input;
-  int len = input.size();
-  char *ret = string_strip_tags(input.data(), len, allowable_tags.data(),
-                                allowable_tags.size(), false);
-  return String(ret, len, AttachString);
+  return string_strip_tags(input.data(), input.size(),
+                           allowable_tags.data(), allowable_tags.size(), false);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -190,9 +186,8 @@ Variant StringUtil::ChunkSplit(const String& body, int chunklen /* = 76 */,
     ret = body;
     ret += end;
   } else {
-    char *chunked = string_chunk_split(body.data(), len, end.c_str(),
-                                       end.size(), chunklen);
-    return String(chunked, len, AttachString);
+    return string_chunk_split(body.data(), len, end.c_str(),
+                              end.size(), chunklen);
   }
   return ret;
 }
@@ -335,71 +330,50 @@ String StringUtil::HtmlDecode(const String& input, QuoteStyle quoteStyle,
 String StringUtil::QuotedPrintableEncode(const String& input) {
   if (input.empty()) return input;
   int len = input.size();
-  char *ret = string_quoted_printable_encode(input.data(), len);
-  return String(ret, len, AttachString);
+  return string_quoted_printable_encode(input.data(), len);
 }
 
 String StringUtil::QuotedPrintableDecode(const String& input) {
   if (input.empty()) return input;
   int len = input.size();
-  char *ret = string_quoted_printable_decode(input.data(), len, false);
-  return String(ret, len, AttachString);
+  return string_quoted_printable_decode(input.data(), len, false);
 }
 
 String StringUtil::UUEncode(const String& input) {
   if (input.empty()) return input;
-
-  int len;
-  char *encoded = string_uuencode(input.data(), input.size(), len);
-  return String(encoded, len, AttachString);
+  return string_uuencode(input.data(), input.size());
 }
 
 String StringUtil::UUDecode(const String& input) {
   if (!input.empty()) {
-    int len;
-    char *decoded = string_uudecode(input.data(), input.size(), len);
-    if (decoded) {
-      return String(decoded, len, AttachString);
-    }
+    return string_uudecode(input.data(), input.size());
   }
-  return String();
+  return null_string;
 }
 
 String StringUtil::Base64Encode(const String& input) {
   int len = input.size();
-  char *ret = string_base64_encode(input.data(), len);
-  return String(ret, len, AttachString);
+  return string_base64_encode(input.data(), len);
 }
 
 String StringUtil::Base64Decode(const String& input,
                                 bool strict /* = false */) {
   int len = input.size();
-  char *ret = string_base64_decode(input.data(), len, strict);
-  return String(ret, len, AttachString);
+  return string_base64_decode(input.data(), len, strict);
 }
 
 String StringUtil::UrlEncode(const String& input,
                              bool encodePlus /* = true */) {
-  int len = input.size();
-  char *ret;
-  if (encodePlus) {
-    ret = url_encode(input.data(), len);
-  } else {
-    ret = url_raw_encode(input.data(), len);
-  }
-  return String(ret, len, AttachString);
+  return encodePlus ?
+    url_encode(input.data(), input.size()) :
+    url_raw_encode(input.data(), input.size());
 }
 
 String StringUtil::UrlDecode(const String& input,
                              bool decodePlus /* = true */) {
-  int len = input.size();
-  char *ret;
-  if (decodePlus) {
-    ret = url_decode(input.data(), len);
-  } else {
-    ret = url_raw_decode(input.data(), len);
-  }
-  return String(ret, len, AttachString);
+  return decodePlus ?
+    url_decode(input.data(), input.size()) :
+    url_raw_decode(input.data(), input.size());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -407,8 +381,7 @@ String StringUtil::UrlDecode(const String& input,
 
 String StringUtil::MoneyFormat(const char *format, double value) {
   assert(format);
-  char *formatted = string_money_format(format, value);
-  return formatted ? String(formatted, AttachString) : String();
+  return string_money_format(format, value);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -441,14 +414,19 @@ String StringUtil::Crypt(const String& input, const char *salt /* = "" */) {
   return String(string_crypt(input.c_str(), salt), AttachString);
 }
 
-String StringUtil::MD5(const String& input, bool raw /* = false */) {
-  Md5Digest md5(input.data(), input.size());
+String StringUtil::MD5(const char *data, uint32_t size,
+                       bool raw /* = false */) {
+  Md5Digest md5(data, size);
   auto const rawLen = sizeof(md5.digest);
   if (raw) return String((char*)md5.digest, rawLen, CopyString);
   auto const hexLen = rawLen * 2;
   String hex(hexLen, ReserveString);
   string_bin2hex((char*)md5.digest, rawLen, hex.bufferSlice().ptr);
   return hex.setSize(hexLen);
+}
+
+String StringUtil::MD5(const String& input, bool raw /* = false */) {
+  return MD5(input.data(), input.length(), raw);
 }
 
 String StringUtil::SHA1(const String& input, bool raw /* = false */) {

@@ -54,12 +54,6 @@ final class ImmSet<Tv> implements ConstSet<Tv> {
   public function getIterator(): SetIterator<Tv>;
 
   /**
-   * Returns the index of the first element that matches the search value.
-   * If no element matches the search value, this function returns -1.
-   */
-  public function linearSearch(Tv $search_value): int;
-
-  /**
    * Returns an ImmSet containing the values from the specified array.
    */
   public static function fromArray(array $arr): ImmSet<Tv>;
@@ -67,6 +61,13 @@ final class ImmSet<Tv> implements ConstSet<Tv> {
   public static function fromItems(?Traversable<Tv> $items): ImmSet<Tv>;
 
   public static function fromArrays(...): ImmSet<Tv>;
+
+  /**
+   * Returns a ImmSet built from the keys of the specified container.
+   */
+  public static function fromKeysOf<Tk, Tv2>(
+    ?KeyedContainer<Tk,Tv2> $container
+  ): ImmSet<Tk>;
 
   public function __toString(): string;
 
@@ -95,8 +96,13 @@ final class ImmSet<Tv> implements ConstSet<Tv> {
   public function lazy(): Iterable<Tv>;
   public function map<Tu>((function(Tv): Tu) $callback): ImmSet<Tu>;
   public function filter((function(Tv): bool) $callback): ImmSet<Tv>;
-  public function zip<Tu>(Traversable<Tu> $iterable): ImmSet<Pair<Tv, Tu>>;
-  public function concat(Traversable<Tv> $iterable): ImmVector<Tv>;
+  public function zip<Tu>(Traversable<Tu> $traversable): ImmSet<Pair<Tv, Tu>>;
+  public function take(int $n): ImmSet<Tv>;
+  public function takeWhile((function(Tv): bool) $fn): ImmSet<Tv>;
+  public function skip(int $n): ImmSet<Tv>;
+  public function skipWhile((function(Tv): bool) $fn): ImmSet<Tv>;
+  public function slice(int $start, int $len): ImmSet<Tv>;
+  public function concat(Traversable<Tv> $traversable): ImmVector<Tv>;
   public function firstValue(): ?Tv;
   public function lastValue(): ?Tv;
 }

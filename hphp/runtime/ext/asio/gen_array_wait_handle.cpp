@@ -20,8 +20,7 @@
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/asio/asio_context.h"
 #include "hphp/runtime/ext/asio/asio_session.h"
-#include <hphp/runtime/ext/asio/static_exception_wait_handle.h>
-#include <hphp/runtime/ext/asio/static_result_wait_handle.h>
+#include <hphp/runtime/ext/asio/static_wait_handle.h>
 #include "hphp/system/systemlib.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
@@ -68,15 +67,22 @@ static void fail() {
 
 Object c_GenArrayWaitHandle::ti_create(const Array& inputDependencies) {
   Array depCopy(inputDependencies->copy());
-  if (UNLIKELY(depCopy->kind() > ArrayData::kMixedKind)) {
-    // The only array kind that can return a non-kPackedKind or
-    // non-kMixedKind from ->copy() is NameValueTableWrapper, which
-    // returns itself.  This is only for $GLOBALS, which is about to
-    // throw anyway since it will fail the WaitHandle checks below.
+  if (UNLIKELY(depCopy->kind() > ArrayData::kMixedKind) &&
+      depCopy->kind() != ArrayData::kEmptyKind) {
+    // The only array kind that can return a non-k{Packed,Mixed,Empty}Kind
+    // from ->copy() is NameValueTableWrapper, which returns itself.
+    // This is only for $GLOBALS, which is about to throw anyway since it
+    // will fail the WaitHandle checks below.
     fail();
   }
   assert(depCopy->kind() == ArrayData::kPackedKind ||
-         depCopy->kind() == ArrayData::kMixedKind);
+         depCopy->kind() == ArrayData::kMixedKind ||
+         depCopy->kind() == ArrayData::kEmptyKind);
+
+  if (depCopy->kind() == ArrayData::kEmptyKind) {
+    auto const empty = make_tv<KindOfArray>(depCopy.get());
+    return c_StaticWaitHandle::CreateSucceeded(empty);
+  }
 
   Object exception;
 
@@ -134,14 +140,15 @@ Object c_GenArrayWaitHandle::ti_create(const Array& inputDependencies) {
   // that's all we give back.  Otherwise give back the array of
   // results.
   if (exception.isNull()) {
-    return c_StaticResultWaitHandle::Create(
+    return c_StaticWaitHandle::CreateSucceeded(
       make_tv<KindOfArray>(depCopy.get()));
   } else {
-    return c_StaticExceptionWaitHandle::Create(exception.get());
+    return c_StaticWaitHandle::CreateFailed(exception.get());
   }
 }
 
 void c_GenArrayWaitHandle::initialize(const Object& exception, const Array& deps, ssize_t iter_pos, c_WaitableWaitHandle* child) {
+  setState(STATE_BLOCKED);
   m_exception = exception;
   m_deps = deps;
   m_iterPos = iter_pos;
@@ -161,6 +168,7 @@ void c_GenArrayWaitHandle::initialize(const Object& exception, const Array& deps
 }
 
 void c_GenArrayWaitHandle::onUnblocked() {
+  assert(getState() == STATE_BLOCKED);
   MixedArray::ValIter arrIter(m_deps.get(), m_iterPos);
 
   for (; !arrIter.empty(); arrIter.advance()) {
@@ -197,13 +205,16 @@ void c_GenArrayWaitHandle::onUnblocked() {
   m_iterPos = arrIter.currentPos();
 
   if (m_exception.isNull()) {
-    setResult(make_tv<KindOfArray>(m_deps.get()));
-    m_deps = nullptr;
+    setState(STATE_SUCCEEDED);
+    cellDup(make_tv<KindOfArray>(m_deps.get()), m_resultOrException);
   } else {
-    setException(m_exception.get());
+    setState(STATE_FAILED);
+    tvWriteObject(m_exception.get(), &m_resultOrException);
     m_exception = nullptr;
-    m_deps = nullptr;
   }
+
+  m_deps = nullptr;
+  done();
 }
 
 String c_GenArrayWaitHandle::getName() {

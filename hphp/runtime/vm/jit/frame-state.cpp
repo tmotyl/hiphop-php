@@ -69,13 +69,14 @@ void FrameState::update(const IRInstruction* inst) {
 
   switch (opc) {
   case DefInlineFP:    trackDefInlineFP(inst);  break;
-  case InlineReturn:   trackInlineReturn(inst); break;
+  case InlineReturn:   trackInlineReturn(); break;
 
   case Call:
     m_spValue = inst->dst();
     m_frameSpansCall = true;
-    // A call pops the ActRec and pushes a return value.
-    m_spOffset -= kNumActRecCells;
+    // A call pops the ActRec and the arguments, and then pushes a
+    // return value.
+    m_spOffset -= kNumActRecCells + inst->extra<Call>()->numParams;
     m_spOffset += 1;
     assert(m_spOffset >= 0);
     clearCse();
@@ -196,8 +197,9 @@ void FrameState::getLocalEffects(const IRInstruction* inst,
   };
 
   auto killedCallLocals = false;
-  if ((inst->is(CallArray) && inst->extra<CallArrayData>()->destroyLocals) ||
-      (inst->is(Call, CallBuiltin) && inst->extra<CallData>()->destroyLocals)) {
+  if ((inst->is(CallArray) && inst->extra<CallArray>()->destroyLocals) ||
+      (inst->is(Call) && inst->extra<Call>()->destroyLocals) ||
+      (inst->is(CallBuiltin) && inst->extra<CallBuiltin>()->destroyLocals)) {
     clearLocals(hook);
     killedCallLocals = true;
   }
@@ -221,6 +223,17 @@ void FrameState::getLocalEffects(const IRInstruction* inst,
     case StLoc:
       hook.setLocalValue(inst->extra<LocalId>()->locId, inst->src(1));
       break;
+
+    case LdGbl: {
+      auto const type = inst->typeParam().relaxToGuardable();
+      hook.setLocalType(inst->extra<LdGbl>()->locId, type);
+      break;
+    }
+    case StGbl: {
+      auto const type = inst->src(1)->type().relaxToGuardable();
+      hook.setLocalType(inst->extra<StGbl>()->locId, type);
+      break;
+    }
 
     case LdLoc:
       hook.setLocalValue(inst->extra<LdLoc>()->locId, inst->dst());
@@ -537,7 +550,19 @@ void FrameState::merge(Snapshot& state) {
     // preserve local values if they're the same in both states,
     // This would be the place to insert phi nodes (jmps+deflabels) if we want
     // to avoid clearing state, which triggers a downstream reload.
-    if (local.value != m_locals[i].value) local.value = nullptr;
+    if (local.value != m_locals[i].value) {
+      // try to merge SSATmps for the local if one of them came from
+      // a passthrough instruction with the other as the source.
+      auto isParent = [](SSATmp* parent, SSATmp* child) -> bool {
+        return child && child->inst()->isPassthrough() &&
+               child->inst()->getPassthroughValue() == parent;
+      };
+      if (isParent(m_locals[i].value, local.value)) {
+        local.value = m_locals[i].value;
+      } else if (!isParent(local.value, m_locals[i].value)) {
+        local.value = nullptr;
+      }
+    }
     if (local.typeSource != m_locals[i].typeSource) local.typeSource = nullptr;
 
     local.type = Type::unionOf(local.type, m_locals[i].type);
@@ -593,7 +618,7 @@ void FrameState::trackDefInlineFP(const IRInstruction* inst) {
   m_locals.resize(target->numLocals());
 }
 
-void FrameState::trackInlineReturn(const IRInstruction* inst) {
+void FrameState::trackInlineReturn() {
   assert(m_inlineSavedStates.size());
   assert(m_inlineSavedStates.back().inlineSavedStates.empty());
   load(m_inlineSavedStates.back());
@@ -634,6 +659,13 @@ SSATmp* FrameState::cseLookup(IRInstruction* inst,
 }
 
 void FrameState::clear() {
+  // A previous run of reoptimize could've legitimately exited the trace in an
+  // inlined callee. If that happened, just pop all the saved states to return
+  // to the top-level func.
+  while (inlineDepth()) {
+    trackInlineReturn();
+  }
+
   clearCse();
   clearLocals(*this);
   m_frameSpansCall = false;

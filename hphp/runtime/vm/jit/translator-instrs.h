@@ -23,17 +23,16 @@
 #define IRREGULAR_INSTRS \
   CASE(Add) \
   CASE(AddO) \
-  CASE(AssertObjL) \
-  CASE(AssertObjStk) \
-  CASE(AssertTL) \
-  CASE(AssertTStk) \
   CASE(Await) \
+  CASE(AssertRATL) \
+  CASE(AssertRATStk) \
   CASE(BindM) \
   CASE(BoxR) \
   CASE(BoxRNop) \
   CASE(BreakTraceHint) \
   CASE(CGetM) \
   CASE(ClsCnsD) \
+  CASE(ConcatN) \
   CASE(ContEnter) \
   CASE(ContRaise) \
   CASE(CreateCont) \
@@ -69,8 +68,6 @@
   CASE(MIterNextK) \
   CASE(NewStructArray) \
   CASE(NopDefCls) \
-  CASE(PredictTL) \
-  CASE(PredictTStk) \
   CASE(RetC) \
   CASE(RetV) \
   CASE(SSwitch) \
@@ -163,6 +160,7 @@
   CASE(LateBoundCls) \
   CASE(MIterFree) \
   CASE(Mod) \
+  CASE(Pow) \
   CASE(NativeImpl) \
   CASE(NewArray) \
   CASE(NewCol) \
@@ -183,6 +181,7 @@
   CASE(SetS) \
   CASE(Shl) \
   CASE(Shr) \
+  CASE(Silence) \
   CASE(Sqrt) \
   CASE(StaticLoc) \
   CASE(StaticLocInit) \

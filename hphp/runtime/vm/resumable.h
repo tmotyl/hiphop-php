@@ -55,16 +55,16 @@ struct Resumable {
     return offsetof(Resumable, m_resumeOffset);
   }
 
-  static void* Create(const ActRec* fp, JIT::TCA resumeAddr,
+  static void* Create(const ActRec* fp, size_t numSlots, JIT::TCA resumeAddr,
                       Offset resumeOffset, size_t objSize) {
     assert(fp);
     auto const func = fp->func();
     assert(func);
-    assert(func->isAsync() || func->isGenerator());
+    assert(func->isResumable());
     assert(func->contains(resumeOffset));
 
     // Allocate memory.
-    size_t frameSize = func->numSlotsInFrame() * sizeof(TypedValue);
+    size_t frameSize = numSlots * sizeof(TypedValue);
     size_t totalSize = frameSize + sizeof(Resumable) + objSize;
     void* mem = MM().objMallocLogged(totalSize);
     auto resumable = (Resumable*)((char*)mem + frameSize);
@@ -101,7 +101,7 @@ struct Resumable {
 
 private:
   static ptrdiff_t sizeForFunc(const Func* func) {
-    assert(func->isAsync() || func->isGenerator());
+    assert(func->isResumable());
     return sizeof(Iter) * func->numIterators() +
            sizeof(TypedValue) * func->numLocals() +
            sizeof(Resumable);
@@ -110,8 +110,10 @@ private:
   // ActRec of the resumed frame.
   ActRec m_actRec;
 
-  // Temporary storage used to save the SP when inlining into a resumable.
-  void* m_stashedSp;
+  // Temporary storage used to save the SP when inlining into a resumable. This
+  // is used in an offsetof expression above, but clang doesn't recognize that
+  // as a "use", hence the UNUSED.
+  UNUSED void* m_stashedSp;
 
   // Resume address.
   JIT::TCA m_resumeAddr;

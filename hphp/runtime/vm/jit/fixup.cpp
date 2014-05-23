@@ -50,19 +50,18 @@ FixupMap::getFrameRegs(const ActRec* ar, const ActRec* prevAr,
 }
 
 void
-FixupMap::recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff) {
-  m_pendingFixups.push_back(PendingFixup(frontier, Fixup(pcOff, spOff)));
-}
-
-void
 FixupMap::recordIndirectFixup(CodeAddress frontier, int dwordsPushed) {
   recordIndirectFixup(frontier, IndirectFixup((2 + dwordsPushed) * 8));
 }
 
 namespace {
+
+// If this function asserts or crashes, it is usually because VMRegAnchor was
+// not used to force a sync prior to calling a runtime function.
 bool isVMFrame(const ExecutionContext* ec, const ActRec* ar) {
-  // If this assert is failing, you may have forgotten a sync point somewhere
   assert(ar);
+  // Determine whether the frame pointer is outside the native stack, cleverly
+  // using a single unsigned comparison to do both halves of the bounds check.
   bool ret = uintptr_t(ar) - s_stackLimit >= s_stackSize;
   assert(!ret ||
          (ar >= ec->m_stack.getStackLowAddress() &&
@@ -182,16 +181,6 @@ FixupMap::fixup(ExecutionContext* ec) const {
   }
 }
 
-void
-FixupMap::processPendingFixups() {
-  for (uint i = 0; i < m_pendingFixups.size(); i++) {
-    TCA tca = m_pendingFixups[i].m_tca;
-    assert(mcg->isValidCodeAddress(tca));
-    recordFixup(tca, m_pendingFixups[i].m_fixup);
-  }
-  m_pendingFixups.clear();
-}
-
 /* This is somewhat hacky. It decides which helpers/builtins should
  * use eager vmreganchor based on profile information. Using eager
  * vmreganchor for all helper calls is a perf regression. */
@@ -199,8 +188,10 @@ bool
 FixupMap::eagerRecord(const Func* func) {
   const char* list[] = {
     "func_get_args",
+    "__SystemLib\\func_get_args_sl",
     "get_called_class",
     "func_num_args",
+    "__SystemLib\\func_num_arg_",
     "array_filter",
     "array_map",
     "__SystemLib\\func_slice_args",

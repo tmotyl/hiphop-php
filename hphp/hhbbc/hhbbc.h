@@ -20,8 +20,11 @@
 #include <memory>
 #include <string>
 #include <set>
+#include <utility>
 
 #include "hphp/util/functional.h"
+
+#include "hphp/runtime/base/repo-auth-type-array.h"
 
 namespace HPHP { struct UnitEmitter; }
 namespace HPHP { namespace HHBBC {
@@ -137,6 +140,12 @@ struct Options {
   bool StrengthReduce = true;
 
   /*
+   * Whether to turn on peephole optimizations (e.g., Concat, ..., Concat ->
+   * ..., ConcatN).
+   */
+  bool Peephole = true;
+
+  /*
    * Whether to enable 'FuncFamily' method resolution.
    *
    * This allows possible overrides of a method to be resolved as a
@@ -181,6 +190,13 @@ struct Options {
    * inferred, we'll raise a notice and unserialize() returns false.
    */
   bool HardPrivatePropInference = true;
+
+  /**
+   * If true, we'll assume that dynamic function calls (like '$f()') do not
+   * have effects on unknown locals (i.e. are not extract / compact /...).
+   * See, e.g. __SystemLib\\extract vs extract.
+   */
+  bool DisallowDynamicVarEnvFuncs = true;
 };
 extern Options options;
 
@@ -195,7 +211,10 @@ extern Options options;
  * expects traits are already flattened (it might be wrong if they
  * aren't).
  */
-std::vector<std::unique_ptr<UnitEmitter>>
+std::pair<
+  std::vector<std::unique_ptr<UnitEmitter>>,
+  std::unique_ptr<ArrayTypeTable::Builder>
+>
 whole_program(std::vector<std::unique_ptr<UnitEmitter>>);
 
 //////////////////////////////////////////////////////////////////////

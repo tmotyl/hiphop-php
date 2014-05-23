@@ -17,15 +17,17 @@
 #ifndef incl_HPHP_RUNTIME_OPTION_H_
 #define incl_HPHP_RUNTIME_OPTION_H_
 
+#include "folly/dynamic.h"
+
 #include <unordered_map>
 #include <vector>
 #include <string>
 #include <map>
 #include <set>
-
 #include <boost/container/flat_set.hpp>
 #include <memory>
 
+#include "hphp/runtime/base/config.h"
 #include "hphp/util/hash-map-typedefs.h"
 #include "hphp/util/functional.h"
 
@@ -38,6 +40,8 @@ struct IpBlockMap;
 struct SatelliteServerInfo;
 struct FilesMatch;
 struct Hdf;
+// Can we make sure this equals IniSetting::Map?
+typedef folly::dynamic IniSettingMap;
 
 constexpr int kDefaultInitialStaticStringTableSize = 500000;
 
@@ -47,7 +51,8 @@ constexpr int kDefaultInitialStaticStringTableSize = 500000;
  */
 class RuntimeOption {
 public:
-  static void Load(Hdf& config,
+  static void Load(const IniSettingMap &ini,
+                   Hdf& config,
                    std::vector<std::string>* overwrites = nullptr,
                    bool empty = false);
 
@@ -341,7 +346,6 @@ public:
   static bool EnableObjDestructCall;
   static bool EnableEmitSwitch;
   static bool EnableEmitterStats;
-  static bool EnableInstructionCounts;
   static bool CheckSymLink;
   static int MaxUserFunctionId;
   static bool EnableArgsInBacktraces;
@@ -350,6 +354,7 @@ public:
   static bool CheckFlushOnUserClose;
   static bool EvalAuthoritativeMode;
   static bool IntsOverflowToInts;
+  static HackStrictOption StrictArrayFillKeys;
 
   static int GetScannerType();
 
@@ -421,6 +426,7 @@ public:
                                                                         \
   F(bool, JitDisabledByHphpd,          false)                           \
   F(bool, JitTransCounters,            false)                           \
+  F(bool, JitPseudomain,               jitPseudomainDefault())          \
   F(bool, HHIRBytecodeControlFlow,     hhirBytecodeControlFlowDefault())\
   F(bool, HHIRCse,                     true)                            \
   F(bool, HHIRSimplification,          true)                            \
@@ -435,7 +441,7 @@ public:
   F(uint32_t, HHIRAlwaysInlineMaxCost, 10)                              \
   F(uint32_t, HHIRInliningMaxDepth,    4)                               \
   F(uint32_t, HHIRInliningMaxReturnDecRefs, 3)                          \
-  F(bool, HHIRInlineFrameOpts,         false)                           \
+  F(bool, HHIRInlineFrameOpts,         true)                            \
   /* 1 (the default) gives most asserts. 2 adds less commonly           \
    * useful/more expensive asserts. */                                  \
   F(uint32_t, HHIRGenerateAsserts,     debug)                           \
@@ -457,7 +463,9 @@ public:
   F(uint64_t, JitPGOThreshold,         kDefaultJitPGOThreshold)         \
   F(bool,     JitPGOHotOnly,           ServerExecutionMode())           \
   F(bool,     JitPGOUsePostConditions, true)                            \
-  F(uint32_t, HotFuncThreshold,        10)                              \
+  F(uint32_t, JitUnlikelyDecRefPercent,10)                              \
+  F(uint32_t, JitPGOReleaseVVMinPercent, 10)                            \
+  F(uint32_t, HotFuncThreshold,        40)                              \
   F(bool, HHIRValidateRefCount,        debug)                           \
   F(bool, HHIRRelaxGuards,             hhirRelaxGuardsDefault())        \
   F(bool, HHBCRelaxGuards,             hhbcRelaxGuardsDefault())        \
@@ -482,9 +490,6 @@ public:
   F(uint32_t, PCRETableSize, kPCREInitialTableSize)                     \
   F(bool, EnableNuma, ServerExecutionMode())                            \
   F(bool, EnableNumaLocal, ServerExecutionMode())                       \
-  F(bool, DecRefUsePlainDecl,          true)                            \
-  F(bool, DecRefUsePlainDeclWithDestroy,true)                           \
-  F(bool, DecRefUseScratch,            false)                           \
   /* */
 
 private:

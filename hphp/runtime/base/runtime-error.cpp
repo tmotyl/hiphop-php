@@ -18,6 +18,7 @@
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/repo-global-data.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/string-vsnprintf.h"
 
@@ -69,6 +70,13 @@ void raise_typehint_error(const std::string& msg) {
   raise_recoverable_error(msg);
   if (RuntimeOption::RepoAuthoritative && Repo::global().HardTypeHints) {
     raise_error("Error handler tried to recover from typehint violation");
+  }
+}
+
+void raise_disallowed_dynamic_call(const std::string& msg) {
+  if ((RuntimeOption::RepoAuthoritative && Repo::global().DisallowDynamicVarEnvFuncs)
+      || RuntimeOption::EnableHipHopSyntax) {
+    raise_error(msg);
   }
 }
 
@@ -292,4 +300,3 @@ void raise_message(ErrorConstants::ErrorModes mode, const std::string &msg) {
 
 ///////////////////////////////////////////////////////////////////////////////
 }
-

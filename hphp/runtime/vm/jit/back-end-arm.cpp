@@ -69,6 +69,9 @@ struct BackEnd : public JIT::BackEnd {
     return ARM::dstConstraint(inst, i);
   }
 
+  RegPair precolorSrc(const IRInstruction& inst, unsigned i) override;
+  RegPair precolorDst(const IRInstruction& inst, unsigned i) override;
+
 #define CALLEE_SAVED_BARRIER() \
   asm volatile("" : : : "x19", "x20", "x21", "x22", "x23", "x24", "x25", \
                "x26", "x27", "x28")
@@ -176,7 +179,7 @@ struct BackEnd : public JIT::BackEnd {
   }
 
   void emitInterpReq(CodeBlock& mainCode, CodeBlock& stubsCode,
-                     const SrcKey& sk, int numInstrs) override {
+                     const SrcKey& sk) override {
     if (RuntimeOption::EvalJitTransCounters) {
       vixl::MacroAssembler a { mainCode };
       ARM::emitTransCounterInc(a);
@@ -185,7 +188,7 @@ struct BackEnd : public JIT::BackEnd {
     // sequence.
     mcg->backEnd().emitSmashableJump(
       mainCode,
-      emitServiceReq(stubsCode, REQ_INTERPRET, sk.offset(), numInstrs),
+      emitServiceReq(stubsCode, REQ_INTERPRET, sk.offset()),
       CC_None
     );
   }
@@ -458,7 +461,7 @@ struct BackEnd : public JIT::BackEnd {
     }
     a.   bind (&interpReqAddr);
     TCA interpReq =
-      emitServiceReq(codeStubs, REQ_INTERPRET, sk.offset(), 0);
+      emitServiceReq(codeStubs, REQ_INTERPRET, sk.offset());
     a.   dc64 (interpReq);
     a.   bind (&after);
   }
@@ -486,6 +489,14 @@ struct BackEnd : public JIT::BackEnd {
 
 std::unique_ptr<JIT::BackEnd> newBackEnd() {
   return std::unique_ptr<JIT::BackEnd>{ folly::make_unique<BackEnd>() };
+}
+
+RegPair BackEnd::precolorSrc(const IRInstruction& inst, unsigned i) {
+  return InvalidRegPair;
+}
+
+RegPair BackEnd::precolorDst(const IRInstruction& inst, unsigned i) {
+  return InvalidRegPair;
 }
 
 }}}

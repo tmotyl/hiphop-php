@@ -62,23 +62,26 @@ namespace {
 #define MProp  MInstrProp
 #define MElem  MInstrElem
 
-#define ND        0
-#define D(n)      HasDest
-#define DofS(n)   HasDest
-#define DUnbox(n) HasDest
-#define DBox(n)   HasDest
-#define DRefineS(n) HasDest
-#define DParam    HasDest
-#define DAllocObj HasDest
-#define DLdRef    HasDest
-#define DThis     HasDest
-#define DMulti    NaryDest
-#define DSetElem  HasDest
-#define DStk(x)   ModifiesStack|(x)
-#define DPtrToParam HasDest
-#define DBuiltin  HasDest
+#define ND             0
+#define D(n)           HasDest
+#define DofS(n)        HasDest
+#define DUnbox(n)      HasDest
+#define DBox(n)        HasDest
+#define DRefineS(n)    HasDest
+#define DParam         HasDest
+#define DAllocObj      HasDest
+#define DArrElem       HasDest
+#define DArrPacked     HasDest
+#define DLdRef         HasDest
+#define DThis          HasDest
+#define DMulti         NaryDest
+#define DSetElem       HasDest
+#define DStk(x)        ModifiesStack|(x)
+#define DPtrToParam    HasDest
+#define DBuiltin       HasDest
 #define DSubtract(n,t) HasDest
-#define DLdRaw    HasDest
+#define DLdRaw         HasDest
+#define DCns           HasDest
 
 struct {
   const char* name;
@@ -115,6 +118,8 @@ struct {
 #undef DBox
 #undef DRefineS
 #undef DParam
+#undef DArrElem
+#undef DArrPacked
 #undef DAllocObj
 #undef DLdRef
 #undef DThis
@@ -125,6 +130,7 @@ struct {
 #undef DBuiltin
 #undef DSubtract
 #undef DLdRaw
+#undef DCns
 
 } // namespace
 

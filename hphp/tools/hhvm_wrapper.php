@@ -27,6 +27,7 @@ function my_option_map(): OptionInfoMap {
 'region-mode:'    => Pair { '',
                             'Which region selector to use (e.g \'method\')' },
 'no-pgo'          => Pair { '', 'Diable PGO' },
+'pgo-threshold:'  => Pair { '', 'PGO threshold to use' },
 'no-obj-destruct' => Pair { '',
                             'Disable global object destructors in CLI mode' },
 'zend'            => Pair { '',  'Enable ZendCompat functions and classes' },
@@ -81,9 +82,15 @@ function determine_flags(OptionMap $opts): string {
     'no-obj-destruct' => '-v Eval.EnableObjDestructCall=0 ',
     'zend'            => '-v Eval.EnableZendCompat=1 ',
     'hphpd'           => '-m debug ',
-    'server'          => '-m server ',
+    'server'          => '-v Eval.JitPGOHotOnly=0 -m server ',
     'arm'             => '-v Eval.SimulateARM=1 ',
   };
+
+  if ($opts->containsKey('pgo-threshold')) {
+    $flags .=
+      '-v Eval.JitPGOThreshold='.$opts['pgo-threshold'].' '.
+      '';
+  }
 
   foreach ($simple_args as $k => $v) {
     if ($opts->containsKey($k)) {
@@ -123,7 +130,7 @@ function argv_for_shell(): string {
   return $ret;
 }
 
-function compile_a_repo(bool $unoptimized): string {
+function compile_a_repo(bool $unoptimized, bool $echo_command): string {
   echo "Compiling with hphp...";
 
   $hphp_out='/tmp/hphp_out'.posix_getpid();
@@ -134,6 +141,9 @@ function compile_a_repo(bool $unoptimized): string {
     '-t hhbc -k1 -l3 '.
     argv_for_shell().
     " >$hphp_out 2>&1";
+  if ($echo_command) {
+    echo "\n", $cmd, "\n";
+  }
   system($cmd);
   echo "done.\n";
 
@@ -143,11 +153,13 @@ function compile_a_repo(bool $unoptimized): string {
   ));
   $repo=$compile_dir.'/hhvm.hhbc';
   system("rm -f $hphp_out");
-  register_shutdown_function(
-    function() use ($compile_dir) {
-      system("rm -fr $compile_dir");
-    },
-  );
+  if ($echo_command !== true) {
+    register_shutdown_function(
+      function() use ($compile_dir) {
+        system("rm -fr $compile_dir");
+      },
+    );
+  }
 
   return $repo;
 }
@@ -160,12 +172,12 @@ function repo_auth_flags(string $flags, string $repo): string {
     '--file ';
 }
 
-function compile_with_hphp(string $flags): string {
-  return repo_auth_flags($flags, compile_a_repo(false));
+function compile_with_hphp(string $flags, bool $print): string {
+  return repo_auth_flags($flags, compile_a_repo(false, $print));
 }
 
 function create_repo(): void {
-  $repo = compile_a_repo(true);
+  $repo = compile_a_repo(true, false);
   system("cp $repo ./hhvm.hhbc");
 }
 
@@ -178,7 +190,7 @@ function run_hhvm(OptionMap $opts): void {
   if ($opts->containsKey('repo')) {
     $flags = repo_auth_flags($flags, $opts['repo']);
   } else if ($opts->containsKey('compile')) {
-    $flags = compile_with_hphp($flags);
+    $flags = compile_with_hphp($flags, $opts->containsKey('print-command'));
   }
 
   $pfx = determine_env($opts);

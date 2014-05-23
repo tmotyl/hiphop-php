@@ -32,12 +32,12 @@ namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct TypedValue;
-class c_Vector;
+class BaseVector;
 class BaseMap;
-class c_Set;
-class c_Pair;
+class BaseSet;
 class c_ImmVector;
 class c_ImmSet;
+class c_Pair;
 struct Iter;
 
 enum class IterNextIndex : uint16_t {
@@ -47,7 +47,9 @@ enum class IterNextIndex : uint16_t {
   Vector,
   ImmVector,
   Map,
+  ImmMap,
   Set,
+  ImmSet,
   Pair,
   Object,
 };
@@ -295,7 +297,8 @@ private:
   friend int64_t new_iter_array(Iter*, ArrayData*, TypedValue*);
   template<bool withRef>
   friend int64_t new_iter_array_key(Iter*, ArrayData*, TypedValue*,
-    TypedValue*);
+                                    TypedValue*);
+
   void arrInit(const ArrayData* arr);
 
   template <bool incRef>
@@ -317,18 +320,22 @@ private:
 
   void destruct();
 
-  c_Vector* getVector() {
-    assert(hasCollection() && getCollectionType() == Collection::VectorType);
-    return (c_Vector*)((intptr_t)m_obj & ~1);
+  BaseVector* getVector() {
+    assert(hasCollection());
+    assert(getCollectionType() == Collection::VectorType ||
+           getCollectionType() == Collection::ImmVectorType);
+    return (BaseVector*)((intptr_t)m_obj & ~1);
   }
-  BaseMap* getMappish() {
+  BaseMap* getMap() {
     assert(hasCollection());
     assert(Collection::isMapType(getCollectionType()));
     return (BaseMap*)((intptr_t)m_obj & ~1);
   }
-  c_Set* getSet() {
-    assert(hasCollection() && getCollectionType() == Collection::SetType);
-    return (c_Set*)((intptr_t)m_obj & ~1);
+  BaseSet* getSet() {
+    assert(hasCollection());
+    assert(getCollectionType() == Collection::SetType ||
+           getCollectionType() == Collection::ImmSetType);
+    return (BaseSet*)((intptr_t)m_obj & ~1);
   }
   c_Pair* getPair() {
     assert(hasCollection() && getCollectionType() == Collection::PairType);
@@ -562,7 +569,7 @@ private:
   ArrayData* m_container;
   // The m_resetFlag is used to indicate a mutable array iterator is
   // "before the first" position in the array.
-  uint32_t m_unused;
+  UNUSED uint32_t m_unused;
   uint32_t m_resetFlag;
 };
 

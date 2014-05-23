@@ -31,8 +31,6 @@ namespace HPHP {
  *
  * WaitHandle                     - abstract wait handle
  *   StaticWaitHandle             - statically finished wait handle
- *     StaticResultWaitHandle     - statically succeeded wait handle with result
- *     StaticExceptionWaitHandle  - statically failed wait handle with exception
  *   WaitableWaitHandle           - wait handle that can be waited for
  *     BlockableWaitHandle        - wait handle that can be blocked by other WH
  *       AsyncFunctionWaitHandle  - async function-based asynchronous execution
@@ -41,9 +39,8 @@ namespace HPHP {
  *       GenVectorWaitHandle      - wait handle representing an Vector of WHs
  *       SetResultToRefWaitHandle - wait handle that sets result to reference
  *     RescheduleWaitHandle       - wait handle that reschedules execution
- *     SessionScopedWaitHandle    - wait handle with session-managed execution
- *       SleepWaitHandle          - wait handle that finishes after a timeout
- *       ExternalThreadEventWaitHandle  - thread-powered asynchronous execution
+ *     SleepWaitHandle            - wait handle that finishes after a timeout
+ *     ExternalThreadEventWaitHandle  - thread-powered asynchronous execution
  *
  * A wait handle can be either synchronously joined (waited for the operation
  * to finish) or passed in various contexts as a dependency and waited for
@@ -54,6 +51,18 @@ FORWARD_DECLARE_CLASS(WaitHandle);
 class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle> {
  public:
   DECLARE_CLASS_NO_SWEEP(WaitHandle)
+
+  enum class Kind : uint8_t {
+    Static              = 0,
+    AsyncFunction       = 1,
+    GenArray            = 2,
+    GenMap              = 3,
+    GenVector           = 4,
+    SetResultToRef      = 5,
+    Reschedule          = 6,
+    Sleep               = 7,
+    ExternalThreadEvent = 8,
+  };
 
   explicit c_WaitHandle(Class* cls = c_WaitHandle::classof())
     : ExtObjectDataFlags(cls)
@@ -74,33 +83,43 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle> {
   Object t_getexceptioniffailed();
 
  public:
-  static c_WaitHandle* fromCell(Cell* cell) {
+  static constexpr ptrdiff_t stateOff() {
+    return offsetof(c_WaitHandle, o_subclassData.u8[0]);
+  }
+  static constexpr ptrdiff_t resultOff() {
+    return offsetof(c_WaitHandle, m_resultOrException);
+  }
+
+  static c_WaitHandle* fromCell(const Cell* cell) {
     return (
         cell->m_type == KindOfObject &&
         cell->m_data.pobj->getAttribute(ObjectData::IsWaitHandle)
       ) ? static_cast<c_WaitHandle*>(cell->m_data.pobj) : nullptr;
   }
-  bool isFinished() { return getState() <= STATE_FAILED; }
-  bool isSucceeded() { return getState() == STATE_SUCCEEDED; }
-  bool isFailed() { return getState() == STATE_FAILED; }
-  Cell& getResult() {
+  bool isFinished() const { return getState() <= STATE_FAILED; }
+  bool isSucceeded() const { return getState() == STATE_SUCCEEDED; }
+  bool isFailed() const { return getState() == STATE_FAILED; }
+  const Cell& getResult() const {
     assert(isSucceeded());
     return m_resultOrException;
   }
-  ObjectData* getException() {
+  ObjectData* getException() const {
     assert(isFailed());
     return m_resultOrException.m_data.pobj;
   }
 
-  uint8_t getState() { return o_subclassData.u8[0]; }
-  void setState(uint8_t state) { o_subclassData.u8[0] = state; }
-
-  static constexpr ptrdiff_t resultOff() {
-    return offsetof(c_WaitHandle, m_resultOrException);
+  Kind getKind() const { return static_cast<Kind>(o_subclassData.u8[0] >> 4); }
+  uint8_t getState() const { return o_subclassData.u8[0] & 0x0F; }
+  static uint8_t toKindState(Kind kind, uint8_t state) {
+    assert((uint8_t)kind < 0x10 && state < 0x10);
+    return ((uint8_t)kind << 4) | state;
+  }
+  void setKindState(Kind kind, uint8_t state) {
+    o_subclassData.u8[0] = toKindState(kind, state);
   }
 
   // The code in the TC will depend on the values of these constants.
-  // See emitAsyncAwait().
+  // See emitAwait().
   static const int8_t STATE_SUCCEEDED = 0;
   static const int8_t STATE_FAILED    = 1;
 

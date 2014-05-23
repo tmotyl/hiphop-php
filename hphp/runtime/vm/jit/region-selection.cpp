@@ -107,7 +107,7 @@ void RegionDesc::addArc(BlockId src, BlockId dst) {
 RegionDesc::BlockId RegionDesc::Block::s_nextId = -1;
 
 TransID getTransId(RegionDesc::BlockId blockId) {
-  return blockId >= 0 ? blockId : InvalidID;
+  return blockId >= 0 ? blockId : kInvalidTransID;
 }
 
 bool hasTransId(RegionDesc::BlockId blockId) {
@@ -298,9 +298,9 @@ RegionDescPtr selectTraceletLegacy(Offset initSpOffset,
                                    const Tracelet& tlet) {
   typedef RegionDesc::Block Block;
 
-  auto region = std::make_shared<RegionDesc>();
+  auto const region = std::make_shared<RegionDesc>();
   SrcKey sk(tlet.m_sk);
-  auto unit = tlet.func()->unit();
+  auto const unit = tlet.func()->unit();
 
   const Func* topFunc = nullptr;
   Block* curBlock = nullptr;
@@ -338,11 +338,26 @@ RegionDescPtr selectTraceletLegacy(Offset initSpOffset,
       auto const& callee = *ni->calleeTrace;
       curBlock->setInlinedCallee(ni->funcd);
       SrcKey cSk = callee.m_sk;
-      Unit* cUnit = callee.func()->unit();
+      auto const cUnit = callee.func()->unit();
 
-      newBlock(cSk, curSpOffset);
+      // Note: the offsets of the inlined blocks aren't currently read
+      // for anything, so it's unclear whether they should be relative
+      // to the main function entry or the inlined function.  We're
+      // just doing this for now.
+      auto const initInliningSpOffset = curSpOffset;
+      newBlock(cSk,
+               initInliningSpOffset + callee.m_instrStream.first->stackOffset);
 
       for (auto cni = callee.m_instrStream.first; cni; cni = cni->next) {
+        // Sometimes inlined callees trace through jumps that have a
+        // known taken/non-taken state based on the calling context:
+        if (cni->nextOffset != kInvalidOffset) {
+          curBlock->addInstruction();
+          cSk.setOffset(cni->nextOffset);
+          newBlock(cSk, initInliningSpOffset + ni->stackOffset);
+          continue;
+        }
+
         assert(cSk == cni->source);
         assert(cni->op() == OpRetC ||
                cni->op() == OpRetV ||
@@ -437,13 +452,15 @@ RegionDescPtr selectRegion(const RegionContext& context,
   auto region = [&]{
     try {
       switch (mode) {
-        case RegionMode::None:     return RegionDescPtr{nullptr};
-        case RegionMode::Method:   return selectMethod(context);
-        case RegionMode::Tracelet: return selectTracelet(context, 0,
-                                                         kind == TransProfile);
+        case RegionMode::None:
+          return RegionDescPtr{nullptr};
+        case RegionMode::Method:
+          return selectMethod(context);
+        case RegionMode::Tracelet:
+          return selectTracelet(context, 0, kind == TransKind::Profile);
         case RegionMode::Legacy:
-                 always_assert(t); return selectTraceletLegacy(context.spOffset,
-                                                               *t);
+          always_assert(t);
+          return selectTraceletLegacy(context.spOffset, *t);
       }
       not_reached();
     } catch (const std::exception& e) {
@@ -558,6 +575,13 @@ struct IgnoreTypePred {
   const bool m_aLonger;
 };
 
+struct IgnoreKnownFunc {
+  // It's ok for a to have known funcs that b doesn't but not the other way
+  // around.
+  bool a(const Func*) const { return true; }
+  bool b(const Func*) const { return false; }
+};
+
 template<typename M, typename Cmp = std::equal_to<typename M::mapped_type>,
          typename IgnorePred = Ignore<typename M::mapped_type>>
 bool mapsEqual(const M& a, const M& b, SrcKey endSk, Cmp equal = Cmp(),
@@ -641,7 +665,8 @@ void diffRegions(const RegionDesc& a, const RegionDesc& b) {
     if (false && !mapsEqual(ab.reffinessPreds(), bb.reffinessPreds(), endSk)) {
       return fail("reffiness preds");
     }
-    if (!mapsEqual(ab.knownFuncs(), bb.knownFuncs(), endSk)) {
+    if (!mapsEqual(ab.knownFuncs(), bb.knownFuncs(), endSk,
+                   std::equal_to<const Func*>(), IgnoreKnownFunc())) {
       return fail("known funcs");
     }
   }
@@ -694,7 +719,8 @@ std::string show(RegionContext::PreLiveAR ar) {
 
 std::string show(const RegionContext& ctx) {
   std::string ret;
-  folly::toAppend(ctx.func->fullName()->data(), "@", ctx.bcOffset, "\n", &ret);
+  folly::toAppend(ctx.func->fullName()->data(), "@", ctx.bcOffset,
+                  ctx.resumed ? "r" : "", "\n", &ret);
   for (auto& t : ctx.liveTypes) folly::toAppend(" ", show(t), "\n", &ret);
   for (auto& ar : ctx.preLiveARs) folly::toAppend(" ", show(ar), "\n", &ret);
 
@@ -704,10 +730,12 @@ std::string show(const RegionContext& ctx) {
 std::string show(const RegionDesc::Block& b) {
   std::string ret{"Block "};
   folly::toAppend(b.id(), ' ',
-    b.func()->fullName()->data(), '@', b.start().offset(),
-    " length ", b.length(), " initSpOff ", b.initialSpOffset(), '\n',
-    &ret
-  );
+                  b.func()->fullName()->data(), '@', b.start().offset(),
+                  b.start().resumed() ? "r" : "",
+                  " length ", b.length(),
+                  " initSpOff ", b.initialSpOffset(), '\n',
+                  &ret
+                 );
 
   auto typePreds = makeMapWalker(b.typePreds());
   auto byRefs    = makeMapWalker(b.paramByRefs());

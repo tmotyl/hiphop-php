@@ -90,6 +90,8 @@ class BackEnd {
   virtual PhysReg rVmFp() = 0;
   virtual Constraint srcConstraint(const IRInstruction& inst, unsigned i) = 0;
   virtual Constraint dstConstraint(const IRInstruction& inst, unsigned i) = 0;
+  virtual RegPair precolorSrc(const IRInstruction& inst, unsigned i) = 0;
+  virtual RegPair precolorDst(const IRInstruction& inst, unsigned i) = 0;
 
   virtual void enterTCHelper(TCA start, TReqInfo& info) = 0;
   virtual CodeGenerator* newCodeGenerator(const IRUnit& unit,
@@ -105,7 +107,7 @@ class BackEnd {
                                  SRFlags flags, ServiceRequest req,
                                  const ServiceReqArgVec& argv) = 0;
   virtual void emitInterpReq(CodeBlock& mainCode, CodeBlock& stubsCode,
-                             const SrcKey& sk, int numInstrs) = 0;
+                             const SrcKey& sk) = 0;
   virtual bool funcPrologueHasGuard(TCA prologue, const Func* func) = 0;
   virtual TCA funcPrologueToGuard(TCA prologue, const Func* func) = 0;
   virtual SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& stubsCode,

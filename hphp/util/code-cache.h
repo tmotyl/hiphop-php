@@ -49,6 +49,10 @@ struct CodeCache {
 
   size_t codeSize() const { return m_codeSize; }
 
+  // Returns the total amount of code emitted to all blocks. Not synchronized,
+  // so the value may be stale by the time this function returns.
+  size_t totalUsed() const;
+
   CodeAddress base() const { return m_base; }
   bool isValidCodeAddress(CodeAddress addr) const;
 
@@ -72,6 +76,9 @@ struct CodeCache {
   // Read-only access for MCGenerator::dumpTCCode()
   const CodeBlock& prof() const { return m_prof; }
 
+  void lock() { m_lock = true; }
+  void unlock() { m_lock = false; }
+  size_t mainUsed() const { return m_main.used(); }
 private:
   CodeAddress m_base;
   CodeAddress m_mainBase;
@@ -85,6 +92,7 @@ private:
   CodeBlock m_prof;        // used for hot code of profiling translations
   CodeBlock m_trampolines; // used to enable static calls to distant code
   DataBlock m_data;        // data to be used by translated code
+  bool      m_lock;        // don't allow access to main() or stubs()
 };
 
 struct CodeCache::Selector {

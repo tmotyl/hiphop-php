@@ -165,7 +165,7 @@ bool Func::isFuncIdValid(FuncId id) {
   return s_funcVec.get(id) != nullptr;
 }
 
-void Func::setFullName() {
+void Func::setFullName(int numParams) {
   assert(m_name->isStatic());
   if (m_cls) {
     m_fullName = makeStaticString(
@@ -178,12 +178,15 @@ void Func::setFullName() {
     int numPre = isClosureBody() ? 1 : 0;
     char* from = (char*)this - numPre * sizeof(Func);
 
-    int maxNumPrologues = Func::getMaxNumPrologues(m_numParams);
+    int maxNumPrologues = Func::getMaxNumPrologues(numParams);
     int numPrologues = maxNumPrologues > kNumFixedPrologues ?
       maxNumPrologues : kNumFixedPrologues;
     char* to = (char*)(m_prologueTable + numPrologues);
     Debug::DebugInfo::recordDataMap(
-      from, to, folly::format("Func-{}-{}", numPre, m_fullName->data()).str());
+      from, to, folly::format("Func-{}-{}", numPre,
+                              (isPseudoMain() ?
+                               m_unit->filepath()->data() :
+                               m_fullName->data())).str());
   }
   if (RuntimeOption::DynamicInvokeFunctions.size()) {
     if (RuntimeOption::DynamicInvokeFunctions.find(m_fullName->data()) !=
@@ -213,6 +216,13 @@ bool Func::anyBlockEndsAt(Offset off) const {
   }
 
   return m_shared->m_blockEnds.count(off) != 0;
+}
+
+int Func::numPrologues() const {
+  int maxNumPrologues = Func::getMaxNumPrologues(numParams());
+  int nPrologues = maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
+                                                        : kNumFixedPrologues;
+  return nPrologues;
 }
 
 void Func::resetPrologue(int numParams) {
@@ -249,7 +259,7 @@ void Func::init(int numParams) {
   m_maybeIntercepted = -1;
   if (!preClass()) {
     setNewFuncId();
-    setFullName();
+    setFullName(numParams);
   } else {
     m_fullName = nullptr;
   }
@@ -357,7 +367,7 @@ void Func::destroy(Func* func) {
        * They're not real prologs, and they shouldn't be
        * smashed, so clear them out here.
        */
-      f->initPrologues(f->m_numParams);
+      f->initPrologues(f->numParams());
       Func::destroy(f);
     }
   }
@@ -369,19 +379,23 @@ void Func::destroy(Func* func) {
   }
 }
 
-Func* Func::clone(Class* cls) const {
+Func* Func::clone(Class* cls, const StringData* name) const {
+  auto numParams = this->numParams();
   Func* f = new (allocFuncMem(
                    m_name,
-                   m_numParams,
+                   numParams,
                    isClosureBody(),
                    cls || !preClass())) Func(*this);
 
-  f->initPrologues(m_numParams);
+  f->initPrologues(numParams);
   f->m_funcId = InvalidFuncId;
+  if (name) {
+    f->m_name = name;
+  }
   if (cls != f->m_cls) {
     f->m_cls = cls;
-    f->setFullName();
   }
+  f->setFullName(numParams);
   f->m_profCounter = 0;
   return f;
 }
@@ -424,7 +438,7 @@ Func* Func::findCachedClone(Class* cls) const {
 
 void Func::rename(const StringData* name) {
   m_name = name;
-  setFullName();
+  setFullName(numParams());
   // load the renamed function
   Unit::loadFunc(this);
 }
@@ -522,7 +536,7 @@ bool Func::byRef(int32_t arg) const {
   if (UNLIKELY(arg >= kBitsPerQword)) {
     // Super special case. A handful of builtins are varargs functions where the
     // (not formally declared) varargs are pass-by-reference. psychedelic-kitten
-    if (arg >= m_numParams) {
+    if (arg >= numParams()) {
       return m_attrs & AttrVariadicByRef;
     }
     ref = &shared()->m_refBitPtr[(uint32_t)arg / kBitsPerQword - 1];
@@ -532,6 +546,7 @@ bool Func::byRef(int32_t arg) const {
 }
 
 const StaticString s_extract("extract");
+const StaticString s_extractNative("__SystemLib\\extract");
 
 bool Func::mustBeRef(int32_t arg) const {
   if (!byRef(arg)) return false;
@@ -540,10 +555,11 @@ bool Func::mustBeRef(int32_t arg) const {
       // Extract is special (in more ways than one)---here it needs
       // to be able to take its first argument by ref or not by ref.
       if (name() == s_extract.get() && !cls()) return false;
+      if (name() == s_extractNative.get() && !cls()) return false;
     }
   }
   return
-    arg < m_numParams ||
+    arg < numParams() ||
     !(m_attrs & AttrVariadicByRef) ||
     !methInfo() ||
     !(methInfo()->attribute & ClassInfo::MixedVariableArguments);
@@ -551,9 +567,13 @@ bool Func::mustBeRef(int32_t arg) const {
 
 void Func::appendParam(bool ref, const Func::ParamInfo& info,
                        std::vector<ParamInfo>& pBuilder) {
-  int qword = m_numParams / kBitsPerQword;
-  int bit   = m_numParams % kBitsPerQword;
-  m_numParams++;
+  auto numParams = pBuilder.size();
+
+  // When called by FuncEmitter, the least significant bit of m_paramCounts
+  // are not yet being used as a variadic flag, so numParams() cannot be
+  // used
+  int qword = numParams / kBitsPerQword;
+  int bit   = numParams % kBitsPerQword;
   assert(!info.isVariadic() || (m_attrs & AttrVariadicParam));
   uint64_t* refBits = &m_refBitVal;
   // Grow args, if necessary.
@@ -576,6 +596,26 @@ void Func::appendParam(bool ref, const Func::ParamInfo& info,
   *refBits &= ~(1ull << bit);
   *refBits |= uint64_t(ref) << bit;
   pBuilder.push_back(info);
+}
+
+/* This function is expected to be called after all calls to appendParam
+ * are complete. After, m_paramCounts is initialized such that the least
+ * significant bit of this->m_paramCounts indicates whether the last param
+ * is (non)variadic; and the rest of the bits are the number of params.
+ */
+void Func::finishedEmittingParams(std::vector<ParamInfo>& fParams) {
+  assert(m_paramCounts == 0);
+  if (!fParams.size()) {
+    assert(!m_refBitVal && !shared()->m_refBitPtr);
+    m_refBitVal = attrs() & AttrVariadicByRef ? -1uLL : 0uLL;
+  }
+
+  shared()->m_params = fParams;
+  m_paramCounts = fParams.size() << 1;
+  if (!(m_attrs & AttrVariadicParam)) {
+    m_paramCounts |= 1;
+  }
+  assert(numParams() == fParams.size());
 }
 
 Id Func::lookupVarId(const StringData* name) const {
@@ -628,6 +668,9 @@ void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
       out << std::endl;
     }
   }
+  out << "maxStackCells: " << maxStackCells() << '\n'
+      << "numLocals: " << numLocals() << '\n'
+      << "numIterators: " << numIterators() << '\n';
 
   const EHEntVec& ehtab = shared()->m_ehtab;
   size_t ehId = 0;
@@ -644,8 +687,9 @@ void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
     }
     if (catcher) {
       out << std::endl;
-      for (EHEnt::CatchVec::const_iterator it2 = it->m_catches.begin();
-           it2 != it->m_catches.end(); ++it2) {
+      for (auto it2 = it->m_catches.begin();
+          it2 != it->m_catches.end();
+          ++it2) {
         out << "  Handle " << m_unit->lookupLitstrId(it2->first)->data()
           << " at " << it2->second;
       }
@@ -704,7 +748,8 @@ void Func::getFuncInfo(ClassInfo::MethodInfo* mi) const {
       mi->docComment = docComment()->data();
     }
     // Get the parameter info
-    for (unsigned i = 0; i < unsigned(m_numParams); ++i) {
+    auto limit = numParams();
+    for (unsigned i = 0; i < limit; ++i) {
       ClassInfo::ParameterInfo* pi = new ClassInfo::ParameterInfo;
       attr = 0;
       if (byRef(i)) {
@@ -850,23 +895,14 @@ Offset Func::getEntryForNumArgs(int numArgsPassed) const {
 bool Func::shouldPGO() const {
   if (!RuntimeOption::EvalJitPGO) return false;
 
-  // Async function and generator bodies consist of two types of basic
-  // blocks. One type is executed in non-generator mode (eager execution),
-  // other in generator mode (resumed execution). Translator may emit
-  // the same opcodes in a different way based on the execution mode.
-  // This currently breaks region-based retranslation, as the information
-  // about the current execution mode is lost.
-  //
-  // TODO(#3880036): remove this once SrcKey contains execution mode bit
-  if (isAsync() || isGenerator()) return false;
-
+  // Task #4314804: Add support for closures in PGO mode.
   // Cloned closures use the func prologue tables to hold the
   // addresses of the DV funclets, and not real prologues.  The
   // mechanism to retranslate prologues currently assumes that the
   // prologue tables contain real prologues, so it doesn't properly
   // handle cloned closures for now.  So don't profile & retranslate
   // them for now.
-  if (isClonedClosure()) return false;
+  if (isClosureBody()) return false;
 
   if (!RuntimeOption::EvalJitPGOHotOnly) return true;
   return attrs() & AttrHot;
@@ -1271,19 +1307,11 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
     pi.setVariadic(m_params[i].isVariadic());
     f->appendParam(m_params[i].ref(), pi, fParams);
   }
-  assert(f->m_numParams == m_params.size());
-  if (!m_params.size()) {
-    assert(!f->m_refBitVal && !f->shared()->m_refBitPtr);
-    f->m_refBitVal = attrs & AttrVariadicByRef ? -1uLL : 0uLL;
-  }
 
-  f->shared()->m_params = fParams;
   f->shared()->m_localNames.create(m_localNames);
   f->shared()->m_numLocals = m_numLocals;
   f->shared()->m_numIterators = m_numIterators;
   f->m_maxStackCells = m_maxStackCells;
-  f->m_numNonVariadicParams = (attrs & AttrVariadicParam)
-    ? (f->m_numParams - 1) : f->m_numParams;
   f->shared()->m_staticVars = m_staticVars;
   f->shared()->m_ehtab = m_ehtab;
   f->shared()->m_fpitab = m_fpitab;
@@ -1298,6 +1326,8 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
   f->shared()->m_retUserType = m_retUserType;
   f->shared()->m_originalFilename = m_originalFilename;
   f->shared()->m_isGenerated = isGenerated;
+
+  f->finishedEmittingParams(fParams);
 
   if (attrs & AttrNative) {
     auto nif = Native::GetBuiltinFunction(m_name,

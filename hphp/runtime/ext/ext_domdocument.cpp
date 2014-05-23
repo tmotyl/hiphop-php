@@ -3190,8 +3190,7 @@ Variant c_DOMDocument::t_createcdatasection(const String& data) {
 }
 
 Variant c_DOMDocument::t_createcomment(const String& data) {
-  xmlDocPtr docp = (xmlDocPtr)m_node;
-  xmlNode *node = xmlNewCDataBlock(docp, (xmlChar*)data.data(), data.size());
+  xmlNode *node = xmlNewComment((xmlChar*)data.data());
   if (!node) {
     return false;
   }
@@ -4771,6 +4770,7 @@ bool c_DOMNamedNodeMap::t___isset(Variant name) {
 Variant c_DOMNamedNodeMap::t_getiterator() {
   c_DOMNodeIterator *iter = NEWOBJ(c_DOMNodeIterator)();
   iter->set_iterator(this, this);
+  iter->setKeyIsNamed();
   return Object(iter);
 }
 
@@ -5280,6 +5280,7 @@ void c_DOMNodeIterator::reset_iterator() {
   bool owner = false;
   if (m_objmap->m_nodetype != XML_ENTITY_NODE &&
       m_objmap->m_nodetype != XML_NOTATION_NODE) {
+    m_index = -1;
     if (m_objmap->m_nodetype == DOM_NODESET) {
       m_iter = ArrayIter(m_objmap->m_baseobjptr);
     } else {
@@ -5306,9 +5307,9 @@ void c_DOMNodeIterator::reset_iterator() {
         curnode = dom_get_elements_by_tag_name_ns_raw
           (nodep, m_objmap->m_ns.data(), m_objmap->m_local.data(),
            &previndex, m_index);
-        ++m_index;
       }
     }
+    ++m_index;
   } else {
     if (m_objmap->m_nodetype == XML_ENTITY_NODE) {
       curnode = php_dom_libxml_hash_iter(m_objmap->m_ht, 0);
@@ -5347,8 +5348,11 @@ Variant c_DOMNodeIterator::t_key() {
   if (m_iter) {
     return m_iter.first();
   }
-  xmlNodePtr curnode = m_curobj.getTyped<c_DOMNode>()->m_node;
-  return String((const char *)curnode->name, CopyString);
+  if (m_keyIsNamed) {
+    xmlNodePtr curnode = m_curobj.getTyped<c_DOMNode>()->m_node;
+    return String((const char *)curnode->name, CopyString);
+  }
+  return m_index;
 }
 
 Variant c_DOMNodeIterator::t_next() {
@@ -5381,8 +5385,8 @@ Variant c_DOMNodeIterator::t_next() {
       curnode = dom_get_elements_by_tag_name_ns_raw
         (basenode, m_objmap->m_ns.data(), m_objmap->m_local.data(),
          &previndex, m_index);
-      ++m_index;
     }
+    ++m_index;
   } else {
     if (m_objmap->m_nodetype == XML_ENTITY_NODE) {
       curnode = php_dom_libxml_hash_iter(m_objmap->m_ht, m_index);

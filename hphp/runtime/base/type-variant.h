@@ -67,6 +67,8 @@ namespace HPHP {
 struct Variant : private TypedValue {
   enum class NullInit {};
   enum class NoInit {};
+  enum class CellCopy {};
+  enum class CellDup {};
   enum class ArrayInitCtor {};
 
   Variant() { m_type = KindOfUninit; }
@@ -130,6 +132,8 @@ struct Variant : private TypedValue {
   /* implicit */ Variant(TypedValue *v) = delete;
   /* implicit */ Variant(const /* implicit */ Variant *v) = delete;
   /* implicit */ Variant(/* implicit */ Variant *v) = delete;
+  template<typename Ret, typename... Args>
+  /* implicit */ Variant(Ret (*)(Args...)) = delete;
 
   //////////////////////////////////////////////////////////////////////
 
@@ -139,6 +143,19 @@ struct Variant : private TypedValue {
    */
 
   Variant(const Variant& v);
+
+  Variant(const Variant& v, CellCopy) {
+    m_type = v.m_type;
+    m_data = v.m_data;
+  }
+
+  Variant(const Variant& v, CellDup) {
+    m_type = v.m_type;
+    m_data = v.m_data;
+    if (IS_REFCOUNTED_TYPE(m_type)) {
+      m_data.pstr->incRefCount();
+    }
+  }
 
   Variant& operator=(const Variant& v) {
     return assign(v);
@@ -442,7 +459,13 @@ struct Variant : private TypedValue {
   bool isString() const {
     return IS_STRING_TYPE(getType());
   }
-  bool isInteger() const;
+  bool isInteger() const {
+    return getType() == KindOfInt64;
+  }
+  bool isResource() const {
+    return getType() == KindOfResource;
+  }
+
   bool isNumeric(bool checkString = false) const;
   DataType toNumeric(int64_t &ival, double &dval, bool checkString = false)
     const;
@@ -473,7 +496,6 @@ struct Variant : private TypedValue {
   bool isAllowedAsConstantValue() const {
     return (m_type & kNotConstantValueTypeMask) == 0;
   }
-  bool isResource() const;
 
   /**
    * Whether or not there are at least two variables that are strongly bound.
@@ -655,9 +677,14 @@ struct Variant : private TypedValue {
   /**
    * Output functions
    */
+  /* The last param noQuotes indicates to serializer to not put the output in
+   * double quotes (used when printing the output of a __toDebugDisplay() of
+   * an object when it is a string.
+   */
   void serialize(VariableSerializer *serializer,
                  bool isArrayKey = false,
-                 bool skipNestCheck = false) const;
+                 bool skipNestCheck = false,
+                 bool noQuotes = false) const;
   void unserialize(VariableUnserializer *unserializer,
                    Uns::Mode mode = Uns::Mode::Value);
 
@@ -740,6 +767,21 @@ struct Variant : private TypedValue {
         Cell* asCell()       { return tvToCell(asTypedValue()); }
 
   /*
+   * Read this Variant as an InitCell, without incrementing the
+   * reference count.  I.e. unbox if it is boxed, and turn
+   * KindOfUninit into KindOfNull.
+   */
+  Cell asInitCellTmp() const {
+    TypedValue tv = *this;
+    if (UNLIKELY(tv.m_type == KindOfRef)) {
+      tv.m_data = tv.m_data.pref->tv()->m_data;
+      return tv;
+    }
+    if (tv.m_type == KindOfUninit) tv.m_type = KindOfNull;
+    return tv;
+  }
+
+  /*
    * Access this Variant as a Ref, converting it to a Ref it isn't
    * one.
    */
@@ -754,36 +796,36 @@ struct Variant : private TypedValue {
       (IS_STRING_TYPE(m_type) && m_data.pstr->empty());
   }
 
-  const Variant& set(bool    v);
-  const Variant& set(int     v);
-  const Variant& set(int64_t   v);
-  const Variant& set(double  v);
-  const Variant& set(litstr  v) = delete;
-  const Variant& set(const std::string & v) {
+  void set(bool    v);
+  void set(int     v);
+  void set(int64_t   v);
+  void set(double  v);
+  void set(litstr  v) = delete;
+  void set(const std::string & v) {
     return set(String(v));
   }
-  const Variant& set(StringData  *v);
-  const Variant& set(ArrayData   *v);
-  const Variant& set(ObjectData  *v);
-  const Variant& set(ResourceData  *v);
-  const Variant& set(const StringData  *v) = delete;
-  const Variant& set(const ArrayData   *v) = delete;
-  const Variant& set(const ObjectData  *v) = delete;
-  const Variant& set(const ResourceData  *v) = delete;
+  void set(StringData  *v);
+  void set(ArrayData   *v);
+  void set(ObjectData  *v);
+  void set(ResourceData  *v);
+  void set(const StringData  *v) = delete;
+  void set(const ArrayData   *v) = delete;
+  void set(const ObjectData  *v) = delete;
+  void set(const ResourceData  *v) = delete;
 
-  const Variant& set(const String& v) { return set(v.get()); }
-  const Variant& set(const StaticString & v);
-  const Variant& set(const Array& v) { return set(v.get()); }
-  const Variant& set(const Object& v) { return set(v.get()); }
-  const Variant& set(const Resource& v) { return set(v.get()); }
+  void set(const String& v) { return set(v.get()); }
+  void set(const StaticString & v);
+  void set(const Array& v) { return set(v.get()); }
+  void set(const Object& v) { return set(v.get()); }
+  void set(const Resource& v) { return set(v.get()); }
 
   template<typename T>
-  const Variant& set(const SmartObject<T> &v) {
+  void set(const SmartObject<T> &v) {
     return set(v.get());
   }
 
   template<typename T>
-  const Variant& set(const SmartResource<T> &v) {
+  void set(const SmartResource<T> &v) {
     return set(v.get());
   }
 

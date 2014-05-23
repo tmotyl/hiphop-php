@@ -129,7 +129,7 @@ struct LocalStateHook {
  *
  *   - current function and bytecode offset
  */
-struct FrameState : private LocalStateHook {
+struct FrameState final : private LocalStateHook {
   FrameState(IRUnit& unit, BCMarker firstMarker);
   FrameState(IRUnit& unit, Offset initialSpOffset, const Func* func,
              uint32_t numLocals);
@@ -272,7 +272,7 @@ struct FrameState : private LocalStateHook {
   };
 
   void trackDefInlineFP(const IRInstruction* inst);
-  void trackInlineReturn(const IRInstruction* inst);
+  void trackInlineReturn();
 
   /* LocalStateHook overrides */
   void setLocalValue(uint32_t id, SSATmp* value) override;

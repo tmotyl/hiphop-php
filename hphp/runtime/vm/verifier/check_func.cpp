@@ -452,18 +452,22 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
       PC iva_pc = pc;
       int32_t k = decodeVariableSizeImm(&iva_pc);
       switch (*instr) {
-      case OpStaticLoc:
-      case OpStaticLocInit:
-        ok &= checkLocal(pc, k);
-        break;
-      case OpVerifyParamType:
-        if (k >= numParams()) {
-          error("invalid parameter id %d at %d\n",
-                 k, offset((PC)instr));
-          ok = false;
-        }
-      default:
-        break;
+        case Op::ConcatN:
+          ok &= (k >= 2 && k <= kMaxConcatN);
+          break;
+        case Op::StaticLoc:
+        case Op::StaticLocInit:
+          ok &= checkLocal(pc, k);
+          break;
+        case Op::VerifyParamType:
+          if (k >= numParams()) {
+            error("invalid parameter id %d at %d\n",
+                   k, offset((PC)instr));
+            ok = false;
+          }
+          break;
+        default:
+          break;
       }
       break;
     }
@@ -521,21 +525,6 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
       int op = int(*pc);
       switch (*instr) {
       default: assert(false && "Unexpected opcode with immType OA");
-      case Op::AssertTL: case Op::AssertTStk:
-      case Op::PredictTL: case Op::PredictTStk:
-#define ASSERTT_OP(x)  if (op == static_cast<uint8_t>(AssertTOp::x)) break;
-        ASSERTT_OPS
-#undef ASSERTT_OP
-        error("invalid operation for AssertT*: %d\n", op);
-        ok = false;
-        break;
-      case Op::AssertObjL: case Op::AssertObjStk:
-#define ASSERTOBJ_OP(x) if (op == static_cast<uint8_t>(AssertObjOp::x)) break;
-        ASSERTOBJ_OPS
-#undef ASSERTOBJ_OP
-        error("invalid operator for AssertObj*: %d\n", op);
-        ok = false;
-        break;
       case Op::IsTypeC: case Op::IsTypeL:
 #define ISTYPE_OP(x)  if (op == static_cast<uint8_t>(IsTypeOp::x)) break;
         ISTYPE_OPS
@@ -580,9 +569,19 @@ bool FuncChecker::checkImmediates(const char* name, const Op* instr) {
         error("invalid error kind for Fatal: %d\n", op);
         ok = false;
         break;
+      case OpSilence:
+#define SILENCE_OP(x) if (op == static_cast<uint8_t>(SilenceOp::x)) break;
+        SILENCE_OPS
+#undef SILENCE_OP
+        error("invalid operation for Silence: %d\n", op);
+        ok = false;
+        break;
       }
+    }
+    case RATA:
+      // Nothing to check at the moment.
       break;
-    }}
+    }
   }
   return ok;
 }
@@ -713,6 +712,7 @@ const FlavorDesc* FuncChecker::sig(PC pc) {
     return m_tmp_sig;
   case Op::NewPackedArray:  // ONE(IVA),     CMANY,   ONE(CV)
   case Op::NewStructArray:  // ONE(VSA),     SMANY,   ONE(CV)
+  case Op::ConcatN:         // ONE(IVA),     CMANY,   ONE(CV)
     for (int i = 0, n = instrNumPops((Op*)pc); i < n; ++i) {
       m_tmp_sig[i] = CV;
     }

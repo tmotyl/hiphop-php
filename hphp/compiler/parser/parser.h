@@ -158,6 +158,7 @@ public:
   void encapRefDim(Token &out, Token &var, Token &offset);
   void encapObjProp(Token &out, Token &var, Token &name);
   void encapArray(Token &out, Token &var, Token &expr);
+  void onConst(Token &out, Token &name, Token &value);
   void onConstantValue(Token &out, Token &constant);
   void onScalar(Token &out, int type, Token &scalar);
   void onExprListElem(Token &out, Token *exprs, Token &expr);
@@ -292,10 +293,13 @@ public:
   // for namespace support
   void onNamespaceStart(const std::string &ns, bool file_scope = false);
   void onNamespaceEnd();
-  void onUse(const std::string &ns, const std::string &as);
   void nns(int token = 0, const std::string& text = std::string());
   std::string nsDecl(const std::string &name);
   std::string resolve(const std::string &ns, bool cls);
+
+  void onUse(const std::string &ns, const std::string &as);
+  void onUseFunction(const std::string &fn, const std::string &as);
+  void onUseConst(const std::string &cnst, const std::string &as);
 
   /*
    * Get the current label scope. A new label scope is demarcated by
@@ -337,18 +341,18 @@ public:
 private:
   struct FunctionContext {
     FunctionContext()
-      : hasReturn(false)
+      : hasNonEmptyReturn(false)
       , isGenerator(false)
       , isAsync(false)
     {}
 
     void checkFinalAssertions() {
-      assert(!isGenerator || (!isAsync && !hasReturn));
+      assert(!isGenerator || (!isAsync && !hasNonEmptyReturn));
     }
 
-    bool hasReturn;       // function contains a return statement
-    bool isGenerator;     // function determined to be a generator
-    bool isAsync;         // function determined to be async
+    bool hasNonEmptyReturn; // function contains a non-empty return statement
+    bool isGenerator;       // function determined to be a generator
+    bool isAsync;           // function determined to be async
   };
 
   enum class FunctionType {
@@ -384,6 +388,8 @@ private:
 
   void newScope();
   void completeScope(BlockScopePtr inner);
+
+  void setHasNonEmptyReturn(ConstructPtr blame);
 
   void invalidYield();
   bool setIsGenerator();
@@ -469,7 +475,15 @@ private:
   NamespaceState m_nsState;
   bool m_nsFileScope;
   std::string m_namespace; // current namespace
-  AliasTable m_aliasTable;
+  AliasTable m_nsAliasTable;
+
+  // Function aliases
+  hphp_string_iset m_fnTable;
+  hphp_string_imap<std::string> m_fnAliasTable;
+
+  // Constant aliases
+  hphp_string_set m_cnstTable;
+  hphp_string_map<std::string> m_cnstAliasTable;
 
   void registerAlias(std::string name);
   bool isAutoAliasOn();

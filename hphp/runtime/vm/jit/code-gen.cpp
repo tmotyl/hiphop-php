@@ -120,6 +120,9 @@ void genCodeImpl(CodeBlock& mainCode,
     return state.addresses[block];
   };
 
+  mcg->code.lock();
+  SCOPE_EXIT { mcg->code.unlock(); };
+
   /*
    * Emit the given block on the supplied assembler.  The `nextLinear'
    * is the next block that will be emitted on this assembler.  If is
@@ -194,7 +197,7 @@ void genCode(CodeBlock& main, CodeBlock& stubs, IRUnit& unit,
   if (dumpIREnabled()) {
     AsmInfo ai(unit);
     genCodeImpl(main, stubs, unit, bcMap, mcg, regs, &ai);
-    dumpTrace(kCodeGenLevel, unit, " after code gen ", &regs, &ai);
+    printUnit(kCodeGenLevel, unit, " after code gen ", &regs, &ai);
   } else {
     genCodeImpl(main, stubs, unit, bcMap, mcg, regs, nullptr);
   }

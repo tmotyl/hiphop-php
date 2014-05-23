@@ -216,6 +216,7 @@ public:
   void write(const char *s, int len);
   void write(const char *s) { write(s, strlen(s));}
   void writeStdout(const char *s, int len);
+  size_t getStdoutBytesWritten() const;
 
   typedef void (*PFUNC_STDOUT)(const char *s, int len, void *data);
   void setStdout(PFUNC_STDOUT func, void *data);
@@ -291,6 +292,7 @@ public:
    */
   String getenv(const String& name) const;
   void setenv(const String& name, const String& value);
+  void unsetenv(const String& name);
   Array getEnvs() const { return m_envs; }
 
   String getTimeZone() const { return m_timezone;}
@@ -336,6 +338,7 @@ private:
   int m_protectedLevel;
   PFUNC_STDOUT m_stdout;
   void *m_stdoutData;
+  size_t m_stdoutBytesWritten;
   String m_rawPostData;
 
   // request handlers
@@ -387,7 +390,7 @@ public:
   void requestInit();
   void requestExit();
 
-  static void fillContinuationVars(const Func* func, ActRec* origFp,
+  static void fillResumableVars(const Func* func, ActRec* origFp,
                                    ActRec* genFp);
   void pushLocalsAndIterators(const Func* f, int nparams = 0);
   void enqueueAPCHandle(APCHandle* handle);
@@ -581,6 +584,7 @@ public:
                          Offset* prevPc = nullptr,
                          TypedValue** prevSp = nullptr,
                          bool* fromVMEntry = nullptr);
+  void nullOutReturningActRecs();
   Array debugBacktrace(bool skip = false,
                        bool withSelf = false,
                        bool withThis = false,
@@ -674,7 +678,7 @@ public:
                   ctx.invName, argc, argv);
   }
   void resumeAsyncFunc(Resumable* resumable, ObjectData* freeObj,
-                       Cell& awaitResult);
+                       const Cell& awaitResult);
   void resumeAsyncFuncThrow(Resumable* resumable, ObjectData* freeObj,
                             ObjectData* exception);
 
@@ -696,18 +700,12 @@ public:
 OPCODES
 #undef O
   enum DispatchFlags {
-    LimitInstrs = 1 << 0,
-    BreakOnCtlFlow = 1 << 1,
-    Profile = 1 << 2
+    BreakOnCtlFlow = 1 << 0,
+    Profile        = 1 << 1
   };
   template <int dispatchFlags>
-  void dispatchImpl(int numInstrs);
+  void dispatchImpl();
   void dispatch();
-  // dispatchN() runs numInstrs instructions, or to program termination,
-  // whichever comes first. If the program terminates during execution, m_pc is
-  // set to null.
-  void dispatchN(int numInstrs);
-
   // dispatchBB() tries to run until a control-flow instruction has been run.
   void dispatchBB();
 

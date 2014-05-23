@@ -213,16 +213,6 @@ bool TestCppBase::TestArray() {
     }
     VERIFY(i == 2);
   }
-  /* TODO: fix this
-  {
-    Variant arr = make_map_array("n1", "v1", "n2", "v2");
-    arr.escalate();
-    for (ArrayIter iter = arr.begin(arr, true); !iter->end(); iter->next()) {
-      arr.lvalAt(iter->first()).reset();
-    }
-    VS(arr, Array::Create());
-  }
-  */
 
   static const StaticString s_Array("Array");
 
@@ -585,6 +575,7 @@ bool TestCppBase::TestIpBlockMap() {
   IpBlockMap::BinaryPrefixTrie::InsertNewPrefix(&root, value, 128, true);
   VERIFY(root.isAllowed(value));
 
+  IniSetting::Map ini = IniSetting::Map::object;
   Hdf hdf;
   hdf.fromString(
     "  0 {\n"
@@ -602,7 +593,7 @@ bool TestCppBase::TestIpBlockMap() {
     "  }\n"
   );
 
-  IpBlockMap ibm(hdf);
+  IpBlockMap ibm(ini, hdf);
   VERIFY(!ibm.isBlocking("test/blah.php", "127.0.0.1"));
   VERIFY(ibm.isBlocking("test/blah.php", "8.32.0.104"));
   VERIFY(ibm.isBlocking("test/blah.php",

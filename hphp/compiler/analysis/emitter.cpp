@@ -102,6 +102,7 @@
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/native.h"
 #include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/repo-global-data.h"
 #include "hphp/runtime/vm/as.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/static-string-table.h"
@@ -157,13 +158,9 @@ namespace StackSym {
 
   static const char CN = C | N;
   static const char CG = C | G;
-  static const char CE = C | E;
-  static const char CP = C | P;
   static const char CS = C | S;
   static const char LN = L | N;
   static const char LG = L | G;
-  static const char LE = L | E;
-  static const char LP = L | P;
   static const char LS = L | S;
   static const char AM = A | M;
 
@@ -334,6 +331,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define DEC_I64A int64_t
 #define DEC_DA double
 #define DEC_SA const StringData*
+#define DEC_RATA RepoAuthType
 #define DEC_AA ArrayData*
 #define DEC_BA Label&
 #define DEC_OA(type) type
@@ -407,6 +405,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define POP_LA_I64A(i)
 #define POP_LA_DA(i)
 #define POP_LA_SA(i)
+#define POP_LA_RATA(i)
 #define POP_LA_AA(i)
 #define POP_LA_BA(i)
 #define POP_LA_IMPL(x)
@@ -556,6 +555,14 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #define IMPL3_SA IMPL_SA(a3)
 #define IMPL4_SA IMPL_SA(a4)
 
+// Emitting RATAs isn't supported here right now.  (They're only
+// created in hhbbc.)
+#define IMPL_RATA(var) NOT_REACHED()
+#define IMPL1_RATA IMPL_RATA(a1)
+#define IMPL2_RATA IMPL_RATA(a2)
+#define IMPL3_RATA IMPL_RATA(a3)
+#define IMPL4_RATA IMPL_RATA(a4)
+
 #define IMPL_AA(var) \
   getUnitEmitter().emitInt32(getUnitEmitter().mergeArray(var))
 #define IMPL1_AA IMPL_AA(a1)
@@ -605,6 +612,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef DEC_I64A
 #undef DEC_DA
 #undef DEC_SA
+#undef DEC_RATA
 #undef DEC_AA
 #undef DEC_BA
 #undef DEC_OA
@@ -640,6 +648,7 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef POP_LA_I64A
 #undef POP_LA_DA
 #undef POP_LA_SA
+#undef POP_LA_RATA
 #undef POP_LA_AA
 #undef POP_LA_BA
 #undef POP_LA_IMPL
@@ -710,6 +719,11 @@ static int32_t countStackValues(const std::vector<uchar>& immVec) {
 #undef IMPL2_SA
 #undef IMPL3_SA
 #undef IMPL4_SA
+#undef IMPL_RATA
+#undef IMPL1_RATA
+#undef IMPL2_RATA
+#undef IMPL3_RATA
+#undef IMPL4_RATA
 #undef IMPL_AA
 #undef IMPL1_AA
 #undef IMPL2_AA
@@ -3508,24 +3522,10 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         Id oldErrorLevelLoc = -1;
         Offset start = InvalidAbsoluteOffset;
         if (op == '@') {
-          // XXX This ends up generating two boatloads of instructions; we may
-          // be better off introducing new instructions for the silencer
           oldErrorLevelLoc = m_curFunc->allocUnnamedLocal();
-          // Call error_reporting(0), and stash the return in an unnamed local
           emitVirtualLocal(oldErrorLevelLoc);
-          static const StringData* s_error_reporting =
-            makeStaticString("error_reporting");
-          Offset fpiStart = m_ue.bcPos();
-          e.FPushFuncD(1, s_error_reporting);
-          {
-            FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
-            e.Int(0);
-            e.FPassC(0);
-          }
-          e.FCall(1);
-          e.UnboxR();
-          emitSet(e); // set $oldErrorLevelLoc
-          e.PopC();
+          auto idx = m_evalStack.size() - 1;
+          e.Silence(m_evalStack.getLoc(idx), SilenceOp::Start);
           start = m_ue.bcPos();
         }
 
@@ -3807,6 +3807,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
           case T_IS_SMALLER_OR_EQUAL: e.Lte(); break;
           case '>': e.Gt(); break;
           case T_IS_GREATER_OR_EQUAL: e.Gte(); break;
+          case T_POW: e.Pow(); break;
           default: assert(false);
         }
         return true;
@@ -4105,6 +4106,8 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
               return true;
             }
           }
+        } else if (emitSystemLibVarEnvFunc(e, call)) {
+          return true;
         } else if (call->isCallToFunction("array_slice") &&
                    params && params->getCount() == 2 &&
                    !Option::JitEnableRenameFunction) {
@@ -4771,7 +4774,7 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         visit(y->getValueExpression());
         emitConvertToCell(e);
 
-        // suspend continuation
+        // suspend generator
         if (keyExp) {
           assert(m_evalStack.size() == 2);
           e.YieldK();
@@ -5577,6 +5580,7 @@ void EmitterVisitor::emitSetOp(Emitter& e, int tokenOp) {
       return ifIntOverflow(SetOpOp::MinusEqual, SetOpOp::MinusEqualO);
     case T_MUL_EQUAL:
       return ifIntOverflow(SetOpOp::MulEqual, SetOpOp::MulEqualO);
+    case T_POW_EQUAL:    return SetOpOp::PowEqual;
     case T_DIV_EQUAL:    return SetOpOp::DivEqual;
     case T_CONCAT_EQUAL: return SetOpOp::ConcatEqual;
     case T_MOD_EQUAL:    return SetOpOp::ModEqual;
@@ -6290,15 +6294,20 @@ void EmitterVisitor::emitPostponedMeths() {
 
     if (!fe) {
       assert(p.m_top);
-      if (!m_topMethodEmitted.insert(meth->getOriginalName()).second) {
+      const StringData* methName = makeStaticString(meth->getOriginalName());
+      fe = new FuncEmitter(m_ue, -1, -1, methName);
+      auto oldFunc = m_topMethodEmitted.find(meth->getOriginalName());
+      if (oldFunc != m_topMethodEmitted.end()) {
         throw IncludeTimeFatalException(
           meth,
-          "Function already defined: %s",
-          meth->getOriginalName().c_str());
+          "Cannot redeclare %s() (previously declared in %s:%d)",
+          meth->getOriginalName().c_str(),
+          oldFunc->second->ue().getFilepath()->data(),
+          oldFunc->second->getLocation().second);
       }
+      m_topMethodEmitted.emplace(meth->getOriginalName(), fe);
 
-      const StringData* methName = makeStaticString(meth->getOriginalName());
-      p.m_fe = fe = new FuncEmitter(m_ue, -1, -1, methName);
+      p.m_fe = fe;
       top_fes.push_back(fe);
     }
 
@@ -6310,7 +6319,7 @@ void EmitterVisitor::emitPostponedMeths() {
       emitMethodMetadata(meth, p.m_closureUseVars, p.m_top);
       emitMethod(meth);
     } else if (funcScope->isAsync()) {
-      // emit the outer function (which creates continuation if blocked)
+      // emit the outer function (which creates wait handle if blocked)
       m_curFunc = fe;
       fe->setIsAsync(true);
       emitMethodMetadata(meth, p.m_closureUseVars, p.m_top);
@@ -6333,15 +6342,6 @@ void EmitterVisitor::emitPostponedMeths() {
           folly::format("86static_{}", sv.name->data()).str());
         fe->pce()->addProperty(str, AttrPrivate, nullptr, nullptr,
                                &uninit, RepoAuthType{});
-        if (m_curFunc != fe && !fe->isAsync()) {
-          // In the case of a generator (these func emitters will be
-          // different), we need to propagate the information about
-          // static locals from the generator implementation function
-          // to the generator creation function.  (This is necessary
-          // for the runtime to know how many of the properties on a
-          // closure are for static locals vs. use vars.)
-          fe->addStaticVar(sv);
-        }
       }
     }
 
@@ -6418,7 +6418,6 @@ void EmitterVisitor::bindNativeFunc(MethodStatementPtr meth,
   fe->setDocComment(
     Option::GenerateDocComments ? meth->getDocComment().c_str() : "");
   fe->setReturnType(meth->retTypeAnnotation()->dataType());
-  fe->setMaxStackCells(kNumActRecCells + 1);
   fe->setReturnUserType(makeStaticString(meth->getReturnTypeConstraint()));
 
   FunctionScopePtr funcScope = meth->getFunctionScope();
@@ -6655,7 +6654,6 @@ void EmitterVisitor::emitMethod(MethodStatementPtr meth) {
 void EmitterVisitor::emitMethodDVInitializers(Emitter& e,
                                               MethodStatementPtr& meth,
                                               Label& topOfBody) {
-  // Default value initializers
   bool hasOptional = false;
   ExpressionListPtr params = meth->getParams();
   int numParam = params ? params->getCount() : 0;
@@ -6883,6 +6881,36 @@ void EmitterVisitor::emitVirtualClassBase(Emitter& e, Expr* node) {
   }
 }
 
+bool EmitterVisitor::emitSystemLibVarEnvFunc(Emitter& e,
+                                             SimpleFunctionCallPtr call) {
+  if (call->isCallToFunction("extract")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\extract", call->getParams());
+    return true;
+  } else if (call->isCallToFunction("compact")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\compact_sl", call->getParams());
+    return true;
+  } else if (call->isCallToFunction("get_defined_vars")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\get_defined_vars", call->getParams());
+    return true;
+  } else if (call->isCallToFunction("func_get_args")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\func_get_args_sl", call->getParams());
+    return true;
+  } else if (call->isCallToFunction("func_get_arg")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\func_get_arg_sl", call->getParams());
+    return true;
+  } else if (call->isCallToFunction("func_num_args")) {
+    emitFuncCall(e, call,
+                 "__SystemLib\\func_num_arg_", call->getParams());
+    return true;
+  }
+  return false;
+}
+
 bool EmitterVisitor::emitCallUserFunc(Emitter& e, SimpleFunctionCallPtr func) {
   static struct {
     const char* name;
@@ -6973,6 +7001,7 @@ Func* EmitterVisitor::canEmitBuiltinCall(const std::string& name,
   if (!f ||
       (f->attrs() & AttrNoFCallBuiltin) ||
       !f->nativeFuncPtr() ||
+      f->isMethod() ||
       (f->numParams() > Native::maxFCallBuiltinArgs()) ||
       (numParams > f->numParams())) return nullptr;
 
@@ -7403,6 +7432,7 @@ void EmitterVisitor::emitClass(Emitter& e,
             var = static_pointer_cast<SimpleVariable>(exp);
           }
 
+          auto sym = var->getSymbol();
           /*
            * Translate what hphpc can infer about a property type into
            * a RepoAuthType for the runtime.  The type hphpc has
@@ -7412,9 +7442,11 @@ void EmitterVisitor::emitClass(Emitter& e,
            * imply the type is unboxed, either.
            */
           auto const hphpcType = repoAuthTypeForHphpcType(
-            var->getSymbol()
-              ? var->getSymbol()->getFinalType()->getDataType()
-              : KindOfInvalid);
+            sym ? sym->getFinalType()->getDataType() : KindOfInvalid);
+
+          bool maybePersistent = Option::WholeProgram &&
+            pce->attrs() & AttrPersistent &&
+            sym && !sym->isIndirectAltered() && sym->isStatic();
 
           auto const propName = makeStaticString(var->getName());
           auto const propDoc = Option::GenerateDocComments ?
@@ -7430,6 +7462,7 @@ void EmitterVisitor::emitClass(Emitter& e,
             if (vNode->isScalar()) {
               initScalar(tvVal, vNode);
             } else {
+              maybePersistent = false;
               tvWriteUninit(&tvVal);
               if (!(declAttrs & AttrStatic)) {
                 if (requiresDeepInit(vNode)) {
@@ -7449,6 +7482,7 @@ void EmitterVisitor::emitClass(Emitter& e,
           } else {
             tvWriteNull(&tvVal);
           }
+          if (maybePersistent) propAttrs = propAttrs | AttrPersistent;
           bool added UNUSED =
             pce->addProperty(propName, propAttrs, typeConstraint,
                              propDoc, &tvVal, hphpcType);
@@ -7789,38 +7823,9 @@ void EmitterVisitor::emitForeach(Emitter& e,
  *     error_reporting(oldvalue)
  */
 void EmitterVisitor::emitRestoreErrorReporting(Emitter& e, Id oldLevelLoc) {
-  static const StringData* funcName = makeStaticString("error_reporting");
-  Label dontRollback;
-  // Optimistically call with the old value.  If this returns nonzero, call it
-  // again with that return value.
   emitVirtualLocal(oldLevelLoc);
-  Offset fpiStart = m_ue.bcPos();
-  e.FPushFuncD(1, funcName);
-  {
-    FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
-    emitVirtualLocal(oldLevelLoc);
-    emitCGet(e);
-    e.FPassC(0);
-  }
-  e.FCall(1);
-  e.UnboxR();
-  // stack is now: ...[Loc oldLevelLoc][return value]
-  // save the return value in local, and leave it on the stack
-  emitSet(e);
-  e.Int(0);
-  e.Eq();
-  e.JmpNZ(dontRollback);
-  fpiStart = m_ue.bcPos();
-  e.FPushFuncD(1, funcName);
-  {
-    FPIRegionRecorder fpi(this, m_ue, m_evalStack, fpiStart);
-    emitVirtualLocal(oldLevelLoc);
-    emitCGet(e);
-    e.FPassC(0);
-  }
-  e.FCall(1);
-  e.PopR();
-  dontRollback.set(e);
+  auto idx = m_evalStack.size() - 1;
+  e.Silence(m_evalStack.getLoc(idx), SilenceOp::End);
 }
 
 void EmitterVisitor::emitMakeUnitFatal(Emitter& e,
@@ -7945,11 +7950,8 @@ void EmitterVisitor::copyOverFPIRegions(FuncEmitter* fe) {
 }
 
 void EmitterVisitor::saveMaxStackCells(FuncEmitter* fe) {
-  // Max stack cells is used for stack overflow checks.  We need to
-  // count all the locals, and all cells due to ActRecs.  We don't
-  // need to count this function's own ActRec because whoever called
-  // it already included it in its "max stack cells".
   fe->setMaxStackCells(m_actualStackHighWater +
+                       fe->numIterators() * kNumIterCells +
                        fe->numLocals() +
                        m_fdescHighWater);
   m_actualStackHighWater = 0;
@@ -8154,11 +8156,13 @@ struct Entry {
 const StaticString s_systemlibNativeFunc("/:systemlib.nativefunc");
 const StaticString s_systemlibNativeCls("/:systemlib.nativecls");
 
+const MD5 s_nativeFuncMD5("11111111111111111111111111111111");
+const MD5 s_nativeClassMD5("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
 static std::unique_ptr<UnitEmitter>
 emitHHBCNativeFuncUnit(const HhbcExtFuncInfo* builtinFuncs,
                        ssize_t numBuiltinFuncs) {
-  MD5 md5("11111111111111111111111111111111");
-  auto ue = folly::make_unique<UnitEmitter>(md5);
+  auto ue = folly::make_unique<UnitEmitter>(s_nativeFuncMD5);
   ue->setFilepath(s_systemlibNativeFunc.get());
   ue->addTrivialPseudoMain();
 
@@ -8200,7 +8204,8 @@ emitHHBCNativeFuncUnit(const HhbcExtFuncInfo* builtinFuncs,
     Offset base = ue->bcPos();
     fe->setBuiltinFunc(mi, bif, nif, base);
     ue->emitOp(OpNativeImpl);
-    fe->setMaxStackCells(kNumActRecCells + 1);
+    assert(!fe->numIterators());
+    fe->setMaxStackCells(fe->numLocals());
     fe->setAttrs(fe->attrs() | attrs);
     fe->finish(ue->bcPos(), false);
     ue->recordFunction(fe);
@@ -8209,7 +8214,7 @@ emitHHBCNativeFuncUnit(const HhbcExtFuncInfo* builtinFuncs,
   return ue;
 }
 
-enum ContinuationMethod {
+enum GeneratorMethod {
   METH_NEXT,
   METH_SEND,
   METH_RAISE,
@@ -8217,14 +8222,15 @@ enum ContinuationMethod {
   METH_CURRENT,
   METH_KEY,
 };
-typedef hphp_hash_map<const StringData*, ContinuationMethod,
+typedef hphp_hash_map<const StringData*, GeneratorMethod,
                       string_data_hash, string_data_same> ContMethMap;
 
-static void emitContinuationMethod(UnitEmitter& ue, FuncEmitter* fe,
-                                   ContinuationMethod m) {
+static int32_t emitGeneratorMethod(UnitEmitter& ue,
+                                   FuncEmitter* fe,
+                                   GeneratorMethod m) {
   static const StringData* valStr = makeStaticString("value");
 
-  Attr attrs = (Attr)(AttrBuiltin | AttrPublic | AttrMayUseVV);
+  Attr attrs = (Attr)(AttrBuiltin | AttrPublic);
   fe->init(0, 0, ue.bcPos(), attrs, false, empty_string.get());
   switch (m) {
     case METH_SEND:
@@ -8236,7 +8242,7 @@ static void emitContinuationMethod(UnitEmitter& ue, FuncEmitter* fe,
       // translations
       fe->setAttrs(Attr(fe->attrs() | AttrClone));
 
-      // check continuation status; send()/raise() also checks started
+      // check generator status; send()/raise() also checks started
       ue.emitOp(OpContCheck);
       ue.emitIVA(m == METH_SEND || m == METH_RAISE);
 
@@ -8280,14 +8286,23 @@ static void emitContinuationMethod(UnitEmitter& ue, FuncEmitter* fe,
     default:
       not_reached();
   }
+
+  return 1;  // Above cases push at most one stack cell.
+}
+
+static int32_t emitGetWaitHandleMethod(UnitEmitter& ue, FuncEmitter* fe) {
+  Attr attrs = (Attr)(AttrBuiltin | AttrPublic);
+  fe->init(0, 0, ue.bcPos(), attrs, false, empty_string.get());
+  ue.emitOp(OpThis);
+  ue.emitOp(OpRetC);
+  return 1;  // we use one stack slot
 }
 
 StaticString s_construct("__construct");
 static std::unique_ptr<UnitEmitter>
 emitHHBCNativeClassUnit(const HhbcExtClassInfo* builtinClasses,
                         ssize_t numBuiltinClasses) {
-  MD5 md5("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-  auto ue = folly::make_unique<UnitEmitter>(md5);
+  auto ue = folly::make_unique<UnitEmitter>(s_nativeClassMD5);
   ue->setFilepath(s_systemlibNativeCls.get());
   ue->addTrivialPseudoMain();
 
@@ -8377,17 +8392,21 @@ emitHHBCNativeClassUnit(const HhbcExtClassInfo* builtinClasses,
     bool hasCtor = false;
     for (ssize_t j = 0; j < e.info->m_methodCount; ++j) {
       const HhbcExtMethodInfo* methodInfo = &(e.info->m_methods[j]);
-      static const StringData* continuationCls =
-        makeStaticString("continuation");
+      static const StringData* generatorCls = makeStaticString("generator");
+      static const StringData* waitHandleCls = makeStaticString("waithandle");
+      static const StringData* gwhMeth = makeStaticString("getwaithandle");
       StringData* methName = makeStaticString(methodInfo->m_name);
-      ContinuationMethod* cmeth;
+      GeneratorMethod* cmeth;
 
       FuncEmitter* fe = ue->newMethodEmitter(methName, pce);
       pce->addMethod(fe);
-      if (e.name->isame(continuationCls) &&
+      auto stackPad = int32_t{0};
+      if (e.name->isame(generatorCls) &&
           (cmeth = folly::get_ptr(contMethods, methName))) {
         auto methCpy = *cmeth;
-        emitContinuationMethod(*ue, fe, methCpy);
+        stackPad = emitGeneratorMethod(*ue, fe, methCpy);
+      } else if (e.name->isame(waitHandleCls) && methName->isame(gwhMeth)) {
+        stackPad = emitGetWaitHandleMethod(*ue, fe);
       } else {
         if (e.name->isame(s_construct.get())) {
           hasCtor = true;
@@ -8395,14 +8414,20 @@ emitHHBCNativeClassUnit(const HhbcExtClassInfo* builtinClasses,
 
         // Build the function
         BuiltinFunction bcf = (BuiltinFunction)methodInfo->m_pGenericMethod;
+        auto nativeFunc = methodInfo->m_nativeFunc;
         const ClassInfo::MethodInfo* mi =
           e.ci->getMethodInfo(std::string(methodInfo->m_name));
         Offset base = ue->bcPos();
-        fe->setBuiltinFunc(mi, bcf, nullptr, base);
+        fe->setBuiltinFunc(mi,
+          bcf,
+          reinterpret_cast<BuiltinFunction>(nativeFunc),
+          base
+        );
         ue->emitOp(OpNativeImpl);
       }
       Offset past = ue->bcPos();
-      fe->setMaxStackCells(kNumActRecCells + 1);
+      assert(!fe->numIterators());
+      fe->setMaxStackCells(fe->numLocals() + stackPad);
       fe->finish(past, false);
       ue->recordFunction(fe);
     }
@@ -8572,12 +8597,14 @@ static void addEmitterWorker(AnalysisResultPtr ar, StatementPtr sp,
   ((JobQueueDispatcher<EmitterWorker>*)data)->enqueue(sp->getFileScope());
 }
 
-static void commitGlobalData() {
+static void
+commitGlobalData(std::unique_ptr<ArrayTypeTable::Builder> arrTable) {
   auto gd                     = Repo::GlobalData{};
   gd.HardTypeHints            = Option::HardTypeHints;
   gd.UsedHHBBC                = Option::UseHHBBC;
   gd.HardPrivatePropInference = true;
 
+  if (arrTable) gd.arrayTypeTable.repopulate(*arrTable);
   Repo::get().saveGlobalData(gd);
 }
 
@@ -8642,7 +8669,9 @@ void emitAllHHBC(AnalysisResultPtr ar) {
       }
     }
 
-    if (!Option::UseHHBBC) commitGlobalData();
+    if (!Option::UseHHBBC) {
+      commitGlobalData(std::unique_ptr<ArrayTypeTable::Builder>{});
+    }
   } else {
     dispatcher.waitEmpty();
   }
@@ -8650,8 +8679,7 @@ void emitAllHHBC(AnalysisResultPtr ar) {
   assert(Option::UseHHBBC || ues.empty());
 
   // We need to put the native func units in the repo so hhbbc can
-  // find them, even though they won't be used at runtime.  (We just
-  // regenerate them during process init.)
+  // find them.
   auto nfunc = emitHHBCNativeFuncUnit(hhbc_ext_funcs, hhbc_ext_funcs_count);
   auto ncls  = emitHHBCNativeClassUnit(hhbc_ext_classes,
                                        hhbc_ext_class_count);
@@ -8663,14 +8691,14 @@ void emitAllHHBC(AnalysisResultPtr ar) {
     return;
   }
 
-  ues = HHBBC::whole_program(std::move(ues));
-  batchCommit(std::move(ues));
-  commitGlobalData();
+  auto pair = HHBBC::whole_program(std::move(ues));
+  batchCommit(std::move(pair.first));
+  commitGlobalData(std::move(pair.second));
 }
 
 extern "C" {
 
-String hphp_compiler_serialize_code_model_for(String code, String prefix) {
+StringData* hphp_compiler_serialize_code_model_for(String code, String prefix) {
   AnalysisResultPtr ar(new AnalysisResult());
   auto statements = Parser::ParseString(code, ar, nullptr, false);
   if (statements != nullptr) {
@@ -8684,10 +8712,11 @@ String hphp_compiler_serialize_code_model_for(String code, String prefix) {
     CodeGenerator cg(&serialized, CodeGenerator::Output::CodeModel);
     cg.setAstClassPrefix(prefix.data());
     block->outputCodeModel(cg);
-    std::string r(serialized.str().c_str(), serialized.str().length());
-    return r;
+    return StringData::Make(serialized.str().c_str(),
+                            serialized.str().length(),
+                            CopyString);
   } else {
-    return "";
+    return StringData::Make();
   }
 }
 
@@ -8790,7 +8819,60 @@ Unit* hphp_build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
 
 Unit* hphp_build_native_class_unit(const HhbcExtClassInfo* builtinClasses,
                                    ssize_t numBuiltinClasses) {
-  return emitHHBCNativeClassUnit(builtinClasses, numBuiltinClasses)->create();
+  auto const ue = emitHHBCNativeClassUnit(builtinClasses, numBuiltinClasses);
+
+  /*
+   * In RepoAuthoritative mode, we may have serialized additional
+   * information in attr bits about the native units.  We still
+   * rebuild it, but we'll clobber attr bits with what static analysis
+   * thought.
+   *
+   * Note: this is a bit of a short-term hack that we won't need once
+   * HNI conversion is completed.  We only pull things out of the repo
+   * here that we've explicitly decided we want.
+   */
+  if (!RuntimeOption::RepoAuthoritative) return ue->create();
+  auto const staticAnalysisUnit = Repo::get().urp().loadEmitter(
+    "/:systemlib:static_analysis",
+    s_nativeClassMD5
+  );
+  if (!staticAnalysisUnit) return ue->create();
+
+  // Make a map of the preclasses in `ue', so we can find them.
+  std::map<const StringData*,PreClassEmitter*> uePreClasses;
+  for (auto id = Id{0}; id < ue->numPreClasses(); ++id) {
+    auto const pce = ue->pce(id);
+    always_assert_flog(
+      !uePreClasses.count(pce->name()),
+      "IDL-based native class unit is expected to only have unique "
+      "classes.  {} was non-unique.",
+      pce->name()->data()
+    );
+    uePreClasses[pce->name()] = pce;
+  }
+
+  always_assert_flog(
+    staticAnalysisUnit->numPreClasses() == uePreClasses.size(),
+    "Static analysis unit didn't have the same number of classes as "
+    "our native class unit; repo probably build with a different hhvm build."
+  );
+
+  // Right now, the only thing we do here is clobber all the Attr bits
+  // with the ones we found from static analysis.  (To get things like
+  // AttrNoOverride.)
+  for (auto id = Id{0}; id < staticAnalysisUnit->numPreClasses(); ++id) {
+    auto const staticAnalysisPce = staticAnalysisUnit->pce(id);
+    auto const uePce = uePreClasses[staticAnalysisPce->name()];
+    always_assert_flog(
+      uePce != nullptr,
+      "Static analysis unit had a PreClass we don't have at runtime ({}); "
+      "repo probably was built with a different hhvm build.",
+      staticAnalysisPce->name()->data()
+    );
+    uePce->setAttrs(staticAnalysisPce->attrs());
+  }
+
+  return ue->create();
 }
 
 } // extern "C"

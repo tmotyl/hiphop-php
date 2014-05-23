@@ -54,11 +54,6 @@ using namespace Trace;
 using std::max;
 
 TRACE_SET_MOD(hhir);
-#ifdef DEBUG
-static const bool debug = true;
-#else
-static const bool debug = false;
-#endif
 
 #define HHIR_EMIT(op, ...)                      \
   do {                                          \
@@ -84,11 +79,9 @@ static const bool debug = false;
     }                                                   \
   } while (0)
 
-IRTranslator::IRTranslator(Offset bcOff, Offset spOff, bool resumed,
-                           const Func* curFunc)
-  : m_hhbcTrans(bcOff, spOff, resumed, curFunc)
-{
-}
+IRTranslator::IRTranslator(TransContext context)
+  : m_hhbcTrans{context}
+{}
 
 void IRTranslator::checkType(const JIT::Location& l,
                              const JIT::RuntimeType& rtt,
@@ -308,30 +301,12 @@ IRTranslator::translateInitProp(const NormalizedInstruction& i) {
   HHIR_EMIT(InitProp, i.imm[0].u_SA, static_cast<InitPropOp>(i.imm[1].u_OA));
 }
 
-void IRTranslator::translateAssertTL(const NormalizedInstruction& i) {
-  HHIR_EMIT(AssertTL, i.imm[0].u_LA, static_cast<AssertTOp>(i.imm[1].u_OA));
+void IRTranslator::translateAssertRATL(const NormalizedInstruction& i) {
+  HHIR_EMIT(AssertRATL, i.imm[0].u_IVA, i.imm[1].u_RATA);
 }
 
-void IRTranslator::translateAssertTStk(const NormalizedInstruction& i) {
-  HHIR_EMIT(AssertTStk, i.imm[0].u_IVA, static_cast<AssertTOp>(i.imm[1].u_OA));
-}
-
-void IRTranslator::translateAssertObjL(const NormalizedInstruction& i) {
-  HHIR_EMIT(AssertObjL, i.imm[0].u_LA, i.imm[1].u_SA,
-    static_cast<AssertObjOp>(i.imm[2].u_OA));
-}
-
-void IRTranslator::translateAssertObjStk(const NormalizedInstruction& i) {
-  HHIR_EMIT(AssertObjStk, i.imm[0].u_IVA, i.imm[1].u_SA,
-    static_cast<AssertObjOp>(i.imm[2].u_OA));
-}
-
-void IRTranslator::translatePredictTL(const NormalizedInstruction& i) {
-  HHIR_EMIT(PredictTL, i.imm[0].u_LA, static_cast<AssertTOp>(i.imm[1].u_OA));
-}
-
-void IRTranslator::translatePredictTStk(const NormalizedInstruction& i) {
-  HHIR_EMIT(PredictTStk, i.imm[0].u_IVA, static_cast<AssertTOp>(i.imm[1].u_OA));
+void IRTranslator::translateAssertRATStk(const NormalizedInstruction& i) {
+  HHIR_EMIT(AssertRATStk, i.imm[0].u_IVA, i.imm[1].u_RATA);
 }
 
 void IRTranslator::translateBreakTraceHint(const NormalizedInstruction&) {
@@ -362,6 +337,10 @@ IRTranslator::translateAddO(const NormalizedInstruction& i) {
   } else {
     HHIR_EMIT(AddO);
   }
+}
+
+void IRTranslator::translateConcatN(const NormalizedInstruction& i) {
+  HHIR_EMIT(ConcatN, i.imm[0].u_IVA);
 }
 
 void IRTranslator::translateJmp(const NormalizedInstruction& i) {
@@ -501,6 +480,7 @@ IRTranslator::translateSetOpL(const NormalizedInstruction& i) {
     case SetOpOp::DivEqual:    HHIR_UNIMPLEMENTED(SetOpL_Div);
     case SetOpOp::ConcatEqual: return Op::Concat;
     case SetOpOp::ModEqual:    HHIR_UNIMPLEMENTED(SetOpL_Mod);
+    case SetOpOp::PowEqual:    HHIR_UNIMPLEMENTED(SetOpL_Pow);;
     case SetOpOp::AndEqual:    return Op::BitAnd;
     case SetOpOp::OrEqual:     return Op::BitOr;
     case SetOpOp::XorEqual:    return Op::BitXor;
@@ -583,12 +563,88 @@ IRTranslator::translateFCallBuiltin(const NormalizedInstruction& i) {
             JIT::callDestroysLocals(i, m_hhbcTrans.curFunc()));
 }
 
+static bool isInlinableCPPBuiltin(const Func* f) {
+  if (f->attrs() & (AttrNoFCallBuiltin|AttrStatic) ||
+      f->numParams() > Native::maxFCallBuiltinArgs() ||
+      !f->nativeFuncPtr()) {
+    return false;
+  }
+  if (f->returnType() == KindOfDouble && !Native::allowFCallBuiltinDoubles()) {
+    return false;
+  }
+  if (!f->methInfo()) {
+    // TODO(#4313939): hni builtins
+    return false;
+  }
+  auto const info = f->methInfo();
+  if (info->attribute & (ClassInfo::NoFCallBuiltin |
+                         ClassInfo::VariableArguments |
+                         ClassInfo::RefVariableArguments |
+                         ClassInfo::MixedVariableArguments)) {
+    return false;
+  }
+
+  // Don't do this for things which require this pointer adjustments
+  // for now.
+  if (f->cls() && f->cls()->preClass()->builtinODOffset() != 0) {
+    return false;
+  }
+
+  /*
+   * Right now the IR isn't prepared to do parameter coercing during
+   * an inlining of NativeImpl for any of our param modes.  We'll want
+   * to expand this in the short term, but for now we're targeting
+   * collection member functions, which are a) idl-based (so no hni
+   * support here yet), and b) take const Variant&'s for every param.
+   *
+   * So for now, we only inline cases where the params are Variants.
+   */
+  for (auto i = uint32_t{0}; i < f->numParams(); ++i) {
+    if (f->params()[i].builtinType() != KindOfUnknown) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// Conservative whitelist for hhbc opcodes we know are safe to inline,
+// even if the entire callee body required a AttrMayUseVV.  This
+// affects cases where we're able to eliminate control flow while
+// inlining due to the parameter types, and the AttrMayUseVV flag was
+// due to something happening in a block we won't inline.
+static bool isInliningVVSafe(Op op) {
+  switch (op) {
+  case Op::Null:
+  case Op::AssertRATL:
+  case Op::AssertRATStk:
+  case Op::SetL:
+  case Op::CGetL:
+  case Op::PopC:
+  case Op::JmpNS:
+  case Op::JmpNZ:
+  case Op::JmpZ:
+  case Op::VerifyParamType:
+  case Op::VerifyRetTypeC:
+  case Op::IsTypeL:
+  case Op::RetC:
+    return true;
+  default:
+    break;
+  }
+  return false;
+}
+
 bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
   if (!RuntimeOption::EvalHHIREnableGenTimeInlining) {
     return false;
   }
   if (arch() == Arch::ARM) {
     // TODO(#3331014): hack until more ARM codegen is working.
+    return false;
+  }
+  if (caller->isPseudoMain()) {
+    // TODO(#4238160): Hack inlining into pseudomain callsites is still buggy
     return false;
   }
 
@@ -604,30 +660,45 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
     return true;
   };
 
+  if (callee->isCPPBuiltin() &&
+      static_cast<Op>(*callee->getEntry()) == Op::NativeImpl) {
+    if (isInlinableCPPBuiltin(callee)) {
+      return accept("inlinable CPP builtin");
+    }
+    return refuse("non-inlinable CPP builtin");
+  }
+
+  // If the function may use a varenv or may be variadic, we only
+  // support certain whitelisted instructions which we know won't
+  // actually require this.
+  bool const needCheckVVSafe = callee->attrs() & AttrMayUseVV;
+
   if (callee->numIterators() != 0) {
     return refuse("iterators");
   }
   if (callee->isMagic() || Func::isSpecial(callee->name())) {
     return refuse("special or magic function");
   }
-  if (callee->attrs() & AttrMayUseVV) {
-    return refuse("may use dynamic environment");
+  if (callee->isResumable()) {
+    return refuse("resumables");
   }
-  if (callee->numSlotsInFrame() + callee->maxStackCells() >=
-      kStackCheckLeafPadding) {
+  if (callee->maxStackCells() >= kStackCheckLeafPadding) {
     return refuse("function stack depth too deep");
+  }
+  if (callee->isMethod() && callee->cls() == c_Generator::classof()) {
+    return refuse("Generator member function");
   }
 
   ////////////
 
   assert(!iter.finished() && "shouldIRInline given empty region");
-  bool hotCallingCold = !(callee->attrs() & AttrHot) &&
-                         (caller->attrs() & AttrHot);
+  const bool hotCallingCold = !(callee->attrs() & AttrHot) &&
+                               (caller->attrs() & AttrHot);
   uint64_t cost = 0;
   int inlineDepth = 0;
-  Op op = OpLowInvalid;
+  auto op = Op::LowInvalid;
   smart::vector<const Func*> funcs;
-  const Func* func = callee;
+  auto func = callee;
   funcs.push_back(func);
 
   for (; !iter.finished(); iter.advance()) {
@@ -639,7 +710,7 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
         funcs.push_back(iter.sk().func());
         int totalDepth = 0;
         for (auto* f : funcs) {
-          totalDepth += f->numSlotsInFrame() + f->maxStackCells();
+          totalDepth += f->maxStackCells();
         }
         if (totalDepth >= kStackCheckLeafPadding) {
           return refuse("stack too deep after nested inlining");
@@ -649,6 +720,11 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
     }
     op = iter.sk().op();
     func = iter.sk().func();
+
+    if (needCheckVVSafe && !isInliningVVSafe(op)) {
+      FTRACE(2, "shouldIRInline: {} is not VV safe\n", opcodeToName(op));
+      return refuse("may use dynamic environment");
+    }
 
     // If we hit a RetC/V while inlining, leave that level and
     // continue. Otherwise, accept the tracelet.
@@ -667,9 +743,7 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
 
     // These opcodes don't indicate any additional work in the callee,
     // so they shouldn't count toward the inlining cost.
-    if (op == Op::AssertTL || op == Op::AssertTStk ||
-        op == Op::AssertObjL || op == Op::AssertObjStk ||
-        op == Op::PredictTL || op == Op::PredictTStk) {
+    if (op == Op::AssertRATL || op == Op::AssertRATStk) {
       continue;
     }
 
@@ -691,10 +765,6 @@ bool shouldIRInline(const Func* caller, const Func* callee, RegionIter& iter) {
     if (cost > RuntimeOption::EvalHHIRAlwaysInlineMaxCost &&
         hotCallingCold) {
       return refuse("inlining sizeable cold func into hot func");
-    }
-
-    if (JIT::opcodeBreaksBB(op)) {
-      return refuse("breaks tracelet");
     }
   }
 
@@ -745,7 +815,7 @@ IRTranslator::translateFCall(const NormalizedInstruction& i) {
     if (!i.calleeTrace->m_inliningFailed) {
       assert(shouldIRInline(m_hhbcTrans.curFunc(), i.funcd, *i.calleeTrace));
 
-      m_hhbcTrans.beginInlining(numArgs, i.funcd, returnBcOffset);
+      m_hhbcTrans.beginInlining(numArgs, i.funcd, returnBcOffset, Type::Gen);
       static const bool shapeStats = Stats::enabledAny() &&
                                      getenv("HHVM_STATS_INLINESHAPE");
       if (shapeStats) {
@@ -1118,22 +1188,13 @@ void IRTranslator::translateInstr(const NormalizedInstruction& ni) {
                                          ni.offset(), ni.toString(),
                                          ht.showStack()));
   // When profiling, we disable type predictions to avoid side exits
-  assert(IMPLIES(JIT::tx->mode() == TransProfile, !ni.outputPredicted));
+  assert(IMPLIES(JIT::tx->mode() == TransKind::Profile, !ni.outputPredicted));
 
   if (ni.guardedThis) {
     // Task #2067635: This should really generate an AssertThis
     ht.setThisAvailable();
   }
 
-  if (moduleEnabled(HPHP::Trace::stats, 2)) {
-    ht.emitIncStat(Stats::opcodeToIRPreStatCounter(ni.op()), 1, false);
-  }
-  if (RuntimeOption::EnableInstructionCounts ||
-      moduleEnabled(HPHP::Trace::stats, 3)) {
-    // If the instruction takes a slow exit, the exit trace will
-    // decrement the post counter for that opcode.
-    ht.emitIncStat(Stats::opcodeToIRPostStatCounter(ni.op()), 1, true);
-  }
   ht.emitRB(RBTypeBytecodeStart, ni.source, 2);
 
   auto pc = reinterpret_cast<const Op*>(ni.pc());

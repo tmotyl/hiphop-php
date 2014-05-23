@@ -81,7 +81,7 @@ constexpr auto kLocalsToInitializeInline = 9;
 SrcKey emitPrologueWork(Func* func, int nPassed) {
   vixl::MacroAssembler a { mcg->code.main() };
 
-  if (tx->mode() == TransProflogue) {
+  if (tx->mode() == TransKind::Proflogue) {
     not_implemented();
   }
 
@@ -102,7 +102,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       helper = JIT::trimExtraArgs;
     }
     a.  Mov    (argReg(0), rStashedAR);
-    emitCall(a, CppCall(helper));
+    emitCall(a, CppCall::direct(helper));
     // We'll fix rVmSp below.
   } else {
     if (nPassed < numNonVariadicParams) {
@@ -251,8 +251,9 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       if (paramInfo[i].funcletOff() == InvalidAbsoluteOffset) {
         a.  Mov  (argReg(0), func);
         a.  Mov  (argReg(1), i);
-        auto fixupAddr = emitCall(a, CppCall(JIT::raiseMissingArgument));
-        mcg->fixupMap().recordFixup(fixupAddr, fixup);
+        auto fixupAddr = emitCall(a,
+          CppCall::direct(JIT::raiseMissingArgument));
+        mcg->recordSyncPoint(fixupAddr, fixup.m_pcOffset, fixup.m_spOffset);
         break;
       }
     }
@@ -261,8 +262,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
   // Check surprise flags in the same place as the interpreter: after
   // setting up the callee's frame but before executing any of its
   // code
-  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), false,
-                              mcg->fixupMap(), fixup);
+  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), fixup);
 
   if (func->isClosureBody() && func->cls()) {
     int entry = nPassed <= numNonVariadicParams
@@ -385,12 +385,11 @@ SrcKey emitFuncPrologue(CodeBlock& mainCode, CodeBlock& stubsCode,
     assert(func->numParams() == 2);
     // Special __call prologue
     a.   Mov   (argReg(0), rStashedAR);
-    auto fixupAddr = emitCall(a, CppCall(shuffleArgsForMagicCall));
+    auto fixupAddr = emitCall(a, CppCall::direct(shuffleArgsForMagicCall));
     if (RuntimeOption::HHProfServerEnabled) {
-      mcg->fixupMap().recordFixup(
-        fixupAddr,
-        Fixup(skFuncBody.offset() - func->base(), func->numSlotsInFrame())
-      );
+      mcg->recordSyncPoint(fixupAddr,
+                           skFuncBody.offset() - func->base(),
+                           func->numSlotsInFrame());
     }
 
     if (nPassed == 2) {

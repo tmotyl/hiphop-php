@@ -25,7 +25,10 @@ namespace HPHP {
 
 TRACE_SET_MOD(mcg);
 
-static const int kMaxTranslationBytes = 8192;
+// This value should be enough bytes to emit the "main" part of a
+// minimal translation, which consists of a single jump (for a
+// REQ_INTERPRET service request).
+static const int kMinTranslationBytes = 8;
 
 CodeCache::Selector::Selector(const Args& args)
   : m_cache(args.m_cache)
@@ -37,7 +40,7 @@ CodeCache::Selector::Selector(const Args& args)
     // Profile has higher precedence than Hot.
     if (args.m_profile) {
       m_cache.m_selection = Selection::Profile;
-    } else if (args.m_hot && m_cache.m_hot.available() > kMaxTranslationBytes) {
+    } else if (args.m_hot && m_cache.m_hot.available() > kMinTranslationBytes) {
       m_cache.m_selection = Selection::Hot;
     }
   }
@@ -49,6 +52,7 @@ CodeCache::Selector::~Selector() {
 
 CodeCache::CodeCache()
   : m_selection(Selection::Default)
+  , m_lock(false)
 {
   static const size_t kRoundUp = 2 << 20;
 
@@ -121,13 +125,13 @@ CodeCache::CodeCache()
 
   TRACE(1, "init atrampolines @%p\n", base);
 
-  m_trampolines.init(base, kTrampolinesBlockSize);
+  m_trampolines.init(base, kTrampolinesBlockSize, "trampolines");
 
   auto misalign = kTrampolinesBlockSize;
 
   if (kAHotSize) {
     TRACE(1, "init ahot @%p\n", base);
-    m_hot.init(base, kAHotSize);
+    m_hot.init(base, kAHotSize, "hot");
     enhugen(base, kAHotSize >> 20);
     base += kAHotSize;
     m_hot.skip(misalign);
@@ -136,7 +140,7 @@ CodeCache::CodeCache()
 
   TRACE(1, "init a @%p\n", base);
 
-  m_main.init(base, kASize);
+  m_main.init(base, kASize, "main");
   enhugen(base, RuntimeOption::EvalTCNumHugeHotMB);
   m_mainBase = base;
   base += kASize;
@@ -144,16 +148,16 @@ CodeCache::CodeCache()
   misalign = 0;
 
   TRACE(1, "init aprof @%p\n", base);
-  m_prof.init(base, kAProfSize);
+  m_prof.init(base, kAProfSize, "prof");
   base += kAProfSize;
 
   TRACE(1, "init astubs @%p\n", base);
-  m_stubs.init(base, kAStubsSize);
+  m_stubs.init(base, kAStubsSize, "stubs");
   enhugen(base, RuntimeOption::EvalTCNumHugeColdMB);
   base += kAStubsSize;
 
   TRACE(1, "init gdata @%p\n", base);
-  m_data.init(base, kGDataSize);
+  m_data.init(base, kGDataSize, "gdata");
   base += kGDataSize;
 
   assert(base - m_base <= allocationSize);
@@ -168,8 +172,20 @@ CodeCache::~CodeCache() {
 }
 
 CodeBlock& CodeCache::blockFor(CodeAddress addr) {
+  always_assert(!m_lock);
   return JIT::codeBlockChoose(addr,
                               m_main, m_hot, m_prof, m_stubs, m_trampolines);
+}
+
+size_t CodeCache::totalUsed() const {
+  size_t ret = 0;
+  forEachBlock([&ret](const char*, const CodeBlock& b) {
+    // A thread with the write lease may be modifying b.m_frontier while we
+    // call b.used() but it should never modify b.m_base. This means that at
+    // worst b.used() will return a slightly stale value.
+    ret += b.used();
+  });
+  return ret;
 }
 
 bool CodeCache::isValidCodeAddress(CodeAddress addr) const {
@@ -185,6 +201,7 @@ void CodeCache::unprotect() {
 }
 
 CodeBlock& CodeCache::main() {
+  always_assert(!m_lock);
     switch (m_selection) {
       case Selection::Default: return m_main;
       case Selection::Hot:     return m_hot;
@@ -194,6 +211,7 @@ CodeBlock& CodeCache::main() {
 }
 
 CodeBlock& CodeCache::stubs() {
+  always_assert(!m_lock);
   switch (m_selection) {
     case Selection::Default:
     case Selection::Hot:

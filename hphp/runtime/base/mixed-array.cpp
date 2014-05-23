@@ -701,16 +701,12 @@ ssize_t MixedArray::findImpl(size_t h0, Hit hit) const {
 }
 
 ssize_t MixedArray::find(int64_t ki) const {
-  // all vector methods should work w/out touching the hashtable
-  assert(!isPacked());
   return findImpl(ki, [ki] (const Elm& e) {
     return hitIntKey(e, ki);
   });
 }
 
 ssize_t MixedArray::find(const StringData* s, strhash_t prehash) const {
-  // all vector methods should work w/out touching the hashtable
-  assert(!isPacked());
   auto h = prehash | STRHASH_MSB;
   return findImpl(prehash, [s, h] (const Elm& e) {
     return hitStringKey(e, s, h);
@@ -733,7 +729,6 @@ int32_t* MixedArray::findForInsertImpl(size_t h0, Hit hit) const {
   size_t tableMask = m_tableMask;
   auto* elms = data();
   auto* hashtable = hashTab();
-  int32_t* ret = nullptr;
   for (size_t probeIndex = h0, i = 1;; ++i) {
     auto ei = &hashtable[probeIndex & tableMask];
     ssize_t pos = *ei;
@@ -741,11 +736,8 @@ int32_t* MixedArray::findForInsertImpl(size_t h0, Hit hit) const {
       if (hit(elms[pos])) {
         return ei;
       }
-    } else {
-      if (!ret) ret = ei;
-      if (pos == Empty) {
-        return LIKELY(i <= 100) ? ret : warnUnbalanced(i, ret);
-      }
+    } else if (pos == Empty) {
+        return ei;
     }
     probeIndex += i;
     assert(i <= tableMask && probeIndex == h0 + (i + i*i) / 2);
@@ -873,8 +865,13 @@ bool MixedArray::ExistsStr(const ArrayData* ad, const StringData* k) {
 // Append/insert/update.
 
 ALWAYS_INLINE
-MixedArray* MixedArray::initVal(TypedValue& tv, const Variant& v) {
-  tvAsUninitializedVariant(&tv).constructValHelper(v);
+MixedArray* MixedArray::initVal(TypedValue& tv, Cell v) {
+  cellDup(v, tv);
+  // TODO(#3888164): we should restructure things so we don't have to
+  // check KindOfUninit here.
+  if (UNLIKELY(tv.m_type == KindOfUninit)) {
+    tv.m_type = KindOfNull;
+  }
   return this;
 }
 
@@ -912,13 +909,12 @@ MixedArray* MixedArray::initWithRef(TypedValue& tv, const Variant& v) {
 }
 
 ALWAYS_INLINE
-MixedArray* MixedArray::setVal(TypedValue& tv, const Variant& v) {
-  auto const src = v.asCell();
+MixedArray* MixedArray::setVal(TypedValue& tv, Cell src) {
   auto const dst = tvToCell(&tv);
-  cellSet(*src, *dst);
+  cellSet(src, *dst);
   // TODO(#3888164): we should restructure things so we don't have to
   // check KindOfUninit here.
-  if (UNLIKELY(src->m_type == KindOfUninit)) {
+  if (UNLIKELY(src.m_type == KindOfUninit)) {
     dst->m_type = KindOfNull;
   }
   return this;
@@ -964,6 +960,21 @@ NEVER_INLINE MixedArray* MixedArray::resize() {
   return this;
 }
 
+void NEVER_INLINE
+MixedArray::InsertCheckUnbalanced(MixedArray* ad,
+                                  int32_t* table,
+                                  uint32_t mask,
+                                  Elm* iter,
+                                  Elm* stop) {
+  for (uint32_t i = 0; iter != stop; ++iter, ++i) {
+    auto& e = *iter;
+    if (isTombstone(e.data.m_type)) continue;
+    *ad->findForNewInsertCheckUnbalanced(table, mask,
+                                         e.hasIntKey() ? e.ikey : e.hash())
+      = i;
+  }
+}
+
 MixedArray* MixedArray::Grow(MixedArray* old) {
   assert(!old->isPacked());
   assert(old->m_tableMask <= 0x7fffffffU);
@@ -997,10 +1008,14 @@ MixedArray* MixedArray::Grow(MixedArray* old) {
   auto iter = ad->data();
   auto const stop = iter + oldUsed;
   assert(mask == ad->m_tableMask);
-  for (uint32_t i = 0; iter != stop; ++iter, ++i) {
-    auto& e = *iter;
-    if (isTombstone(e.data.m_type)) continue;
-    *ad->findForNewInsert(table, mask, e.hasIntKey() ? e.ikey : e.hash()) = i;
+  if (UNLIKELY(oldUsed >= 2000)) {
+    InsertCheckUnbalanced(ad, table, mask, iter, stop);
+  } else {
+    for (uint32_t i = 0; iter != stop; ++iter, ++i) {
+      auto& e = *iter;
+      if (isTombstone(e.data.m_type)) continue;
+      *ad->findForNewInsert(table, mask, e.hasIntKey() ? e.ikey : e.hash()) = i;
+    }
   }
 
   old->m_used = -uint32_t{1};
@@ -1130,7 +1145,7 @@ bool MixedArray::nextInsert(const Variant& data) {
   auto& e = allocElm(ei);
   e.setIntKey(ki);
   m_nextKI = ki + 1; // Update next free element.
-  initVal(e.data, data);
+  initVal(e.data, *data.asCell());
   return true;
 }
 
@@ -1165,7 +1180,7 @@ ArrayData* MixedArray::nextInsertWithRef(const Variant& data) {
 }
 
 template <class K> ALWAYS_INLINE
-ArrayData* MixedArray::update(K k, const Variant& data) {
+ArrayData* MixedArray::update(K k, Cell data) {
   assert(!isPacked());
   assert(!isFull());
   auto p = insert(k);
@@ -1242,7 +1257,7 @@ ArrayData* MixedArray::LvalNew(ArrayData* ad, Variant*& ret, bool copy) {
   return a;
 }
 
-ArrayData* MixedArray::SetInt(ArrayData* ad, int64_t k, const Variant& v,
+ArrayData* MixedArray::SetInt(ArrayData* ad, int64_t k, Cell v,
                               bool copy) {
   auto a = asMixed(ad);
   a = copy ? a->copyMixedAndResizeIfNeeded()
@@ -1251,7 +1266,7 @@ ArrayData* MixedArray::SetInt(ArrayData* ad, int64_t k, const Variant& v,
 }
 
 ArrayData*
-MixedArray::SetStr(ArrayData* ad, StringData* k, const Variant& v, bool copy) {
+MixedArray::SetStr(ArrayData* ad, StringData* k, Cell v, bool copy) {
   auto a = asMixed(ad);
   a = copy ? a->copyMixedAndResizeIfNeeded()
            : a->resizeIfNeeded();
@@ -1275,7 +1290,7 @@ MixedArray::SetRefStr(ArrayData* ad, StringData* k, Variant& v, bool copy) {
 }
 
 ArrayData*
-MixedArray::AddInt(ArrayData* ad, int64_t k, const Variant& v, bool copy) {
+MixedArray::AddInt(ArrayData* ad, int64_t k, Cell v, bool copy) {
   assert(!ad->exists(k));
   auto a = asMixed(ad);
   a = copy ? a->copyMixedAndResizeIfNeeded()
@@ -1284,7 +1299,7 @@ MixedArray::AddInt(ArrayData* ad, int64_t k, const Variant& v, bool copy) {
 }
 
 ArrayData*
-MixedArray::AddStr(ArrayData* ad, StringData* k, const Variant& v, bool copy) {
+MixedArray::AddStr(ArrayData* ad, StringData* k, Cell v, bool copy) {
   assert(!ad->exists(k));
   auto a = asMixed(ad);
   a = copy ? a->copyMixedAndResizeIfNeeded()
@@ -1762,7 +1777,7 @@ ArrayData* MixedArray::Prepend(ArrayData* adInput,
   ++a->m_size;
   auto& e = elms[0];
   e.setIntKey(0);
-  a->initVal(e.data, v);
+  a->initVal(e.data, *v.asCell());
 
   // Renumber.
   a->compact(true);

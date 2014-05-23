@@ -35,6 +35,7 @@
 #include "hphp/util/alloc.h"
 #include "hphp/util/hdf.h"
 #include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/config.h"
 
 using HPHP::ScopedMem;
 
@@ -46,47 +47,55 @@ extern void const_load();
 typedef ConcurrentTableSharedStore::KeyValuePair KeyValuePair;
 typedef ConcurrentTableSharedStore::DumpMode DumpMode;
 
-void apcExtension::moduleLoad(Hdf config) {
+void apcExtension::moduleLoad(const IniSetting::Map& ini, Hdf config) {
   Hdf apc = config["Server"]["APC"];
 
-  Enable = apc["EnableApc"].getBool(true);
-  EnableConstLoad = apc["EnableConstLoad"].getBool(false);
-  ForceConstLoadToAPC = apc["ForceConstLoadToAPC"].getBool(true);
-  PrimeLibrary = apc["PrimeLibrary"].getString();
-  LoadThread = apc["LoadThread"].getInt16(2);
-  apc["CompletionKeys"].get(CompletionKeys);
-  std::string tblType = apc["TableType"].getString("concurrent");
+  Enable = Config::GetBool(ini, apc["EnableApc"], true);
+  EnableConstLoad = Config::GetBool(ini, apc["EnableConstLoad"], false);
+  ForceConstLoadToAPC = Config::GetBool(ini, apc["ForceConstLoadToAPC"], true);
+  PrimeLibrary = Config::GetString(ini, apc["PrimeLibrary"]);
+  LoadThread = Config::GetInt16(ini, apc["LoadThread"], 2);
+  Config::Get(ini, apc["CompletionKeys"], CompletionKeys);
+  std::string tblType = Config::GetString(ini, apc["TableType"], "concurrent");
   if (strcasecmp(tblType.c_str(), "concurrent") == 0) {
     TableType = TableTypes::ConcurrentTable;
   } else {
     throw InvalidArgumentException("apc table type", "Invalid table type");
   }
-  EnableApcSerialize = apc["EnableApcSerialize"].getBool(true);
-  ExpireOnSets = apc["ExpireOnSets"].getBool();
-  PurgeFrequency = apc["PurgeFrequency"].getInt32(4096);
-  PurgeRate = apc["PurgeRate"].getInt32(-1);
+  EnableApcSerialize = Config::GetBool(ini, apc["EnableApcSerialize"], true);
+  ExpireOnSets = Config::GetBool(ini, apc["ExpireOnSets"]);
+  PurgeFrequency = Config::GetInt32(ini, apc["PurgeFrequency"], 4096);
+  PurgeRate = Config::GetInt32(ini, apc["PurgeRate"], -1);
 
-  AllowObj = apc["AllowObject"].getBool();
-  TTLLimit = apc["TTLLimit"].getInt32(-1);
+  AllowObj = Config::GetBool(ini, apc["AllowObject"]);
+  TTLLimit = Config::GetInt32(ini, apc["TTLLimit"], -1);
 
   Hdf fileStorage = apc["FileStorage"];
-  UseFileStorage = fileStorage["Enable"].getBool();
-  FileStorageChunkSize = fileStorage["ChunkSize"].getInt64(1LL << 29);
-  FileStorageMaxSize = fileStorage["MaxSize"].getInt64(1LL << 32);
-  FileStoragePrefix = fileStorage["Prefix"].getString("/tmp/apc_store");
-  FileStorageFlagKey = fileStorage["FlagKey"].getString("_madvise_out");
-  FileStorageAdviseOutPeriod = fileStorage["AdviseOutPeriod"].getInt32(1800);
-  FileStorageKeepFileLinked = fileStorage["KeepFileLinked"].getBool();
+  UseFileStorage = Config::GetBool(ini, fileStorage["Enable"]);
+  FileStorageChunkSize = Config::GetInt64(ini, fileStorage["ChunkSize"],
+                                          1LL << 29);
+  FileStorageMaxSize = Config::GetInt64(ini, fileStorage["MaxSize"], 1LL << 32);
+  FileStoragePrefix = Config::GetString(ini, fileStorage["Prefix"],
+                                        "/tmp/apc_store");
+  FileStorageFlagKey = Config::GetString(ini, fileStorage["FlagKey"],
+                                         "_madvise_out");
+  FileStorageAdviseOutPeriod =
+    Config::GetInt32(ini, fileStorage["AdviseOutPeriod"], 1800);
+  FileStorageKeepFileLinked =
+    Config::GetBool(ini, fileStorage["KeepFileLinked"]);
 
-  ConcurrentTableLockFree = apc["ConcurrentTableLockFree"].getBool(false);
-  KeyMaturityThreshold = apc["KeyMaturityThreshold"].getInt32(20);
-  MaximumCapacity = apc["MaximumCapacity"].getInt64(0);
-  KeyFrequencyUpdatePeriod = apc["KeyFrequencyUpdatePeriod"].getInt32(1000);
+  ConcurrentTableLockFree =
+    Config::GetBool(ini, apc["ConcurrentTableLockFree"], false);
+  KeyMaturityThreshold = Config::GetInt32(ini, apc["KeyMaturityThreshold"], 20);
+  MaximumCapacity = Config::GetInt64(ini, apc["MaximumCapacity"], 0);
+  KeyFrequencyUpdatePeriod =
+    Config::GetInt32(ini, apc["KeyFrequencyUpdatePeriod"], 1000);
 
-  apc["NoTTLPrefix"].get(NoTTLPrefix);
+  Config::Get(ini, apc["NoTTLPrefix"], NoTTLPrefix);
 
-  UseUncounted = apc["MemModelTreadmill"].getBool(
-      RuntimeOption::ServerExecutionMode());
+  UseUncounted = Config::GetBool(ini, apc["MemModelTreadmill"],
+                                 RuntimeOption::ServerExecutionMode());
+  InnerUncounted = Config::GetBool(ini, apc["InnerUncounted"], false);
 
   IniSetting::Bind(this, IniSetting::PHP_INI_SYSTEM, "apc.enabled", &Enable);
   IniSetting::Bind(this, IniSetting::PHP_INI_SYSTEM, "apc.stat",
@@ -137,6 +146,7 @@ bool apcExtension::ConcurrentTableLockFree = false;
 bool apcExtension::FileStorageKeepFileLinked = false;
 std::vector<std::string> apcExtension::NoTTLPrefix;
 bool apcExtension::UseUncounted = false;
+bool apcExtension::InnerUncounted = false;
 bool apcExtension::Stat = true;
 // Different from zend default but matches what we've been returning for years
 bool apcExtension::EnableCLI = true;
@@ -144,7 +154,8 @@ bool apcExtension::EnableCLI = true;
 static apcExtension s_apc_extension;
 
 ///////////////////////////////////////////////////////////////////////////////
-Variant f_apc_store(const Variant& key_or_array, const Variant& var /* = null_variant */,
+Variant f_apc_store(const Variant& key_or_array,
+                    const Variant& var /* = null_variant */,
                     int64_t ttl /* = 0 */, int64_t cache_id /* = 0 */) {
   if (!apcExtension::Enable) return false;
 
@@ -197,7 +208,8 @@ bool f_apc_store_as_primed_do_not_use(const String& key, const Variant& var,
   return s_apc_store[cache_id].store(key, var, 0, true, false);
 }
 
-Variant f_apc_add(const Variant& key_or_array, const Variant& var /* = null_variant */,
+Variant f_apc_add(const Variant& key_or_array,
+                  const Variant& var /* = null_variant */,
                   int64_t ttl /* = 0 */, int64_t cache_id /* = 0 */) {
   if (!apcExtension::Enable) return false;
 
@@ -258,7 +270,7 @@ Variant f_apc_fetch(const Variant& key, VRefParam success /* = null */,
       String strKey = k.toString();
       if (s_apc_store[cache_id].get(strKey, v)) {
         tmp = true;
-        init.set(strKey, v, true);
+        init.set(strKey, v);
       }
     }
     success = tmp;

@@ -59,9 +59,16 @@ ArrayData* ArrayData::GetScalarArray(ArrayData* arr) {
 ArrayData* ArrayData::GetScalarArray(ArrayData* arr, const std::string& key) {
   if (arr->empty()) return staticEmptyArray();
   assert(key == f_serialize(arr).toCppString());
+
   ArrayDataMap::accessor acc;
   if (s_arrayDataMap.insert(acc, key)) {
-    ArrayData *ad = arr->nonSmartCopy();
+    ArrayData* ad;
+
+    if (arr->isVectorData() && !arr->isPacked()) {
+      ad = PackedArray::NonSmartConvert(arr);
+    } else {
+      ad = arr->nonSmartCopy();
+    }
     ad->setStatic();
     ad->onSetEvalScalar();
     acc->second = ad;
@@ -162,7 +169,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(NvGetKey)
 
   /*
-   * ArrayData* SetInt(ArrayData*, int64_t key, const Variant& v, bool copy)
+   * ArrayData* SetInt(ArrayData*, int64_t key, Cell v, bool copy)
    *
    *   Set a value in the array for an integer key.  This function has
    *   copy/grow semantics.
@@ -170,7 +177,7 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(SetInt)
 
   /*
-   * ArrayData* SetStr(ArrayData*, StringData*, const Variant& v, bool copy)
+   * ArrayData* SetStr(ArrayData*, StringData*, Cell v, bool copy)
    *
    *   Set a value in the array for a string key.  The string must not
    *   be an integer-like string.  This function has copy/grow
@@ -277,8 +284,8 @@ extern const ArrayFunctions g_array_funcs = {
   DISPATCH(SetRefStr)
 
   /*
-   * ArrayData* AddInt(ArrayData*, int64_t key, const Variant&, bool copy)
-   * ArrayData* AddStr(ArrayData*, StringData* key, const Variant&, bool copy)
+   * ArrayData* AddInt(ArrayData*, int64_t key, Cell, bool copy)
+   * ArrayData* AddStr(ArrayData*, StringData* key, Cell, bool copy)
    *
    *   These functions have the same effects as SetInt and SetStr,
    *   respectively, except that the array may assume that it does not
@@ -429,7 +436,7 @@ extern const ArrayFunctions g_array_funcs = {
   /*
    * ArrayData* Copy(const ArrayData*)
    *
-   *   Explicitly request that an array be copyied.  This API does
+   *   Explicitly request that an array be copied.  This API does
    *   /not/ actually guarantee a copy occurs.
    *
    *   (E.g. NameValueTableWrapper doesn't copy here.)
@@ -619,7 +626,7 @@ ArrayData *ArrayData::Create(const Variant& value) {
 ArrayData *ArrayData::Create(const Variant& name, const Variant& value) {
   ArrayInit init(1, ArrayInit::Map{});
   // There is no toKey() call on name.
-  init.set(name, value, true);
+  init.set(name, value);
   return init.create();
 }
 

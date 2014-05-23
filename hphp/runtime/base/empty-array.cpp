@@ -78,11 +78,11 @@ ssize_t EmptyArray::IterRewind(const ArrayData*, ssize_t prev) {
   not_reached();
 }
 
-// We always return false in ValidMArrayIter, so this should never be
-// called.  ValidMArrayIter may be called on this array kind, though,
-// because Escalate is a no-op.
+// Even though we always return false in ValidMArrayIter, this function may
+// still be called because MArrayIters are constructed in an invalid position,
+// and then advanced to the first element.
 bool EmptyArray::AdvanceMArrayIter(ArrayData*, MArrayIter& fp) {
-  not_reached();
+  return false;
 }
 
 // We're always already a static array.
@@ -92,21 +92,7 @@ ArrayData* EmptyArray::NonSmartCopy(const ArrayData* ad) { not_reached(); }
 //////////////////////////////////////////////////////////////////////
 
 NEVER_INLINE
-ArrayData* EmptyArray::Copy(const ArrayData*) {
-  auto const cap = kPackedSmallSize;
-  auto const ad = static_cast<ArrayData*>(
-    MM().objMallocLogged(sizeof(ArrayData) + sizeof(TypedValue) * cap)
-  );
-  ad->m_kindAndSize = cap;
-  ad->m_posAndCount = static_cast<uint32_t>(ArrayData::invalid_index);
-  assert(ad->m_kind == ArrayData::kPackedKind);
-  assert(ad->m_size == 0);
-  assert(ad->m_packedCap == cap);
-  assert(ad->m_pos == ArrayData::invalid_index);
-  assert(ad->m_count == 0);
-  assert(PackedArray::checkInvariants(ad));
-  return ad;
-}
+ArrayData* EmptyArray::Copy(const ArrayData*) { return staticEmptyArray(); }
 
 ArrayData* EmptyArray::CopyWithStrongIterators(const ArrayData* ad) {
   // We can never have associated strong iterators, so we don't need
@@ -253,8 +239,7 @@ EmptyArray::MakeMixed(int64_t key, TypedValue val) {
 
 //////////////////////////////////////////////////////////////////////
 
-ArrayData* EmptyArray::SetInt(ArrayData*, int64_t k, const Variant& v, bool) {
-  auto c = *v.asCell();
+ArrayData* EmptyArray::SetInt(ArrayData*, int64_t k, Cell c, bool) {
   // TODO(#3888164): we should make it so we don't need KindOfUninit checks
   if (c.m_type == KindOfUninit) c.m_type = KindOfNull;
   tvRefcountedIncRef(&c);
@@ -265,9 +250,8 @@ ArrayData* EmptyArray::SetInt(ArrayData*, int64_t k, const Variant& v, bool) {
 
 ArrayData* EmptyArray::SetStr(ArrayData*,
                               StringData* k,
-                              const Variant& v,
+                              Cell val,
                               bool copy) {
-  auto val = *v.asCell();
   tvRefcountedIncRef(&val);
   // TODO(#3888164): we should make it so we don't need KindOfUninit checks
   if (val.m_type == KindOfUninit) val.m_type = KindOfNull;
@@ -344,11 +328,22 @@ ArrayData* EmptyArray::PlusEq(ArrayData*, const ArrayData* elems) {
 }
 
 ArrayData* EmptyArray::Merge(ArrayData*, const ArrayData* elems) {
-  // TODO(#4049965): can this just copy elems and then renumber?
-  auto const ret = MixedArray::MakeReserveMixed(MixedArray::SmallSize);
-  auto const tmp = MixedArray::Merge(ret, elems);
-  ret->release();
-  return tmp;
+  // Packed arrays don't need renumbering, so don't make a copy.
+  if (elems->isPacked()) {
+    elems->incRefCount();
+    return const_cast<ArrayData*>(elems);
+  }
+  // Fast path the common case that elems is mixed.
+  if (elems->isMixed()) {
+    auto const copy = MixedArray::Copy(elems);
+    copy->incRefCount();
+    MixedArray::Renumber(copy);
+    return copy;
+  }
+  auto copy = elems->copy();
+  copy->incRefCount();
+  copy->renumber();
+  return copy;
 }
 
 ArrayData* EmptyArray::PopOrDequeue(ArrayData* ad, Variant& value) {

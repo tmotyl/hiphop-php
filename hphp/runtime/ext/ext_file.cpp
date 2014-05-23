@@ -39,7 +39,7 @@
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
-#include "hphp/util/file-util.h"
+#include "hphp/runtime/base/file-util.h"
 #include "folly/String.h"
 #include <dirent.h>
 #include <glob.h>
@@ -54,6 +54,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <fnmatch.h>
+#include <boost/algorithm/string/predicate.hpp>
 #include <vector>
 
 #define CHECK_HANDLE_BASE(handle, f, ret)               \
@@ -110,14 +111,20 @@ static bool check_error(const char *function, int line, bool ret) {
 }
 
 static int accessSyscall(
-    const String& path,
+    const String& uri_or_path,
     int mode,
     bool useFileCache = false) {
-  Stream::Wrapper* w = Stream::getWrapperFromURI(path);
+  Stream::Wrapper* w = Stream::getWrapperFromURI(uri_or_path);
+  if (!w) return -1;
+
   if (useFileCache && dynamic_cast<FileStreamWrapper*>(w)) {
+    String path(uri_or_path);
+    if (UNLIKELY(boost::istarts_with(uri_or_path.data(), "file://"))) {
+      path = uri_or_path.substr(sizeof("file://") - 1);
+    }
     return ::access(File::TranslatePathWithFileCache(path).data(), mode);
   }
-  return w->access(path, mode);
+  return w->access(uri_or_path, mode);
 }
 
 static int statSyscall(
@@ -127,6 +134,7 @@ static int statSyscall(
   bool isRelative = path.charAt(0) != '/';
   int pathIndex = 0;
   Stream::Wrapper* w = Stream::getWrapperFromURI(path, &pathIndex);
+  if (!w) return -1;
   bool isFileStream = dynamic_cast<FileStreamWrapper*>(w);
   auto canUseFileCache = useFileCache && isFileStream;
   if (isRelative && !pathIndex) {
@@ -154,6 +162,7 @@ static int lstatSyscall(
     struct stat* buf,
     bool useFileCache = false) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(path);
+  if (!w) return -1;
   if (useFileCache && dynamic_cast<FileStreamWrapper*>(w)) {
     return ::lstat(File::TranslatePathWithFileCache(path).data(), buf);
   }
@@ -177,19 +186,19 @@ const StaticString
 
 Array stat_impl(struct stat *stat_sb) {
   ArrayInit ret(26, ArrayInit::Mixed{});
-  ret.set((int64_t)stat_sb->st_dev);
-  ret.set((int64_t)stat_sb->st_ino);
-  ret.set((int64_t)stat_sb->st_mode);
-  ret.set((int64_t)stat_sb->st_nlink);
-  ret.set((int64_t)stat_sb->st_uid);
-  ret.set((int64_t)stat_sb->st_gid);
-  ret.set((int64_t)stat_sb->st_rdev);
-  ret.set((int64_t)stat_sb->st_size);
-  ret.set((int64_t)stat_sb->st_atime);
-  ret.set((int64_t)stat_sb->st_mtime);
-  ret.set((int64_t)stat_sb->st_ctime);
-  ret.set((int64_t)stat_sb->st_blksize);
-  ret.set((int64_t)stat_sb->st_blocks);
+  ret.append((int64_t)stat_sb->st_dev);
+  ret.append((int64_t)stat_sb->st_ino);
+  ret.append((int64_t)stat_sb->st_mode);
+  ret.append((int64_t)stat_sb->st_nlink);
+  ret.append((int64_t)stat_sb->st_uid);
+  ret.append((int64_t)stat_sb->st_gid);
+  ret.append((int64_t)stat_sb->st_rdev);
+  ret.append((int64_t)stat_sb->st_size);
+  ret.append((int64_t)stat_sb->st_atime);
+  ret.append((int64_t)stat_sb->st_mtime);
+  ret.append((int64_t)stat_sb->st_ctime);
+  ret.append((int64_t)stat_sb->st_blksize);
+  ret.append((int64_t)stat_sb->st_blocks);
   ret.set(s_dev,     (int64_t)stat_sb->st_dev);
   ret.set(s_ino,     (int64_t)stat_sb->st_ino);
   ret.set(s_mode,    (int64_t)stat_sb->st_mode);
@@ -394,7 +403,7 @@ bool f_flock(const Resource& handle, int operation, VRefParam wouldblock /* = nu
   return ret;
 }
 
-// match the behavior of Zend PHP
+// match the behavior of PHP5
 #define FCSV_CHECK_ARG(NAME)                            \
   if (NAME.size() == 0) {                               \
     throw_invalid_argument(#NAME ": %s", NAME.data());  \
@@ -930,7 +939,7 @@ Variant f_realpath(const String& path) {
   }
   // Zend doesn't support streams in realpath
   Stream::Wrapper* w = Stream::getWrapperFromURI(path);
-  if (!dynamic_cast<FileStreamWrapper*>(w)) {
+  if (!w || !dynamic_cast<FileStreamWrapper*>(w)) {
     return false;
   }
   char resolved_path[PATH_MAX];
@@ -1156,6 +1165,7 @@ bool f_copy(const String& source, const String& dest,
 bool f_rename(const String& oldname, const String& newname,
               const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(oldname);
+  if (!w) return false;
   if (w != Stream::getWrapperFromURI(newname)) {
     raise_warning("Can't rename a file on different streams");
     return false;
@@ -1176,6 +1186,7 @@ int64_t f_umask(const Variant& mask /* = null_variant */) {
 
 bool f_unlink(const String& filename, const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(filename);
+  if (!w) return false;
   CHECK_SYSTEM(w->unlink(filename));
   return true;
 }
@@ -1352,6 +1363,7 @@ Variant f_tmpfile() {
 bool f_mkdir(const String& pathname, int64_t mode /* = 0777 */,
              bool recursive /* = false */, const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(pathname);
+  if (!w) return false;
   int options = recursive ? k_STREAM_MKDIR_RECURSIVE : 0;
   CHECK_SYSTEM(w->mkdir(pathname, mode, options));
   return true;
@@ -1359,6 +1371,7 @@ bool f_mkdir(const String& pathname, int64_t mode /* = 0777 */,
 
 bool f_rmdir(const String& dirname, const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(dirname);
+  if (!w) return false;
   int options = 0;
   CHECK_SYSTEM(w->rmdir(dirname, options));
   return true;
@@ -1440,6 +1453,7 @@ Variant f_dir(const String& directory) {
 
 Variant f_opendir(const String& path, const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(path);
+  if (!w) return false;
   Directory *p = w->opendir(path);
   if (!p) {
     return false;
@@ -1475,6 +1489,7 @@ static bool StringAscending(const String& s1, const String& s2) {
 Variant f_scandir(const String& directory, bool descending /* = false */,
                   const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(directory);
+  if (!w) return false;
   Directory *dir = w->opendir(directory);
   if (!dir) {
     return false;

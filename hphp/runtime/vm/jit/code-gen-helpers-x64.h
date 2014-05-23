@@ -91,7 +91,6 @@ void emitTraceCall(CodeBlock& cb, int64_t pcOff);
 void emitTestSurpriseFlags(Asm& as);
 
 void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& stubsCode,
-                                 bool inTracelet, FixupMap& fixupMap,
                                  Fixup fixup);
 
 #ifdef USE_GCC_FAST_TLS
@@ -203,17 +202,9 @@ void emitCmpClass(Asm& as, const Class* c, Mem mem) {
 }
 
 template<class Mem>
-void emitCmpClass(Asm& as, Reg64 reg, Mem mem) {
-  auto size = sizeof(LowClassPtr);
+void emitCmpClass(Asm& as, Reg64 reg, Mem mem);
 
-  if (size == 8) {
-    as.   cmpq    (reg, mem);
-  } else if (size == 4) {
-    as.   cmpl    (r32(reg), mem);
-  } else {
-    not_implemented();
-  }
-}
+void emitCmpClass(Asm& as, Reg64 reg1, PhysReg reg2);
 
 void shuffle2(Asm& as, PhysReg s0, PhysReg s1, PhysReg d0, PhysReg d1);
 

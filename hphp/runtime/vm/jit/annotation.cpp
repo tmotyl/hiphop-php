@@ -20,6 +20,7 @@
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/repo-global-data.h"
 
 namespace HPHP { namespace JIT {
 
@@ -75,7 +76,7 @@ void annotate(NormalizedInstruction* i) {
           : lookupDirectFunc(i->source, funcName, clsName, isStatic);
 
       if (func) {
-        FTRACE(1, "found direct func (%s) for FCallD\n",
+        FTRACE(1, "found direct func ({}) for FCallD\n",
           func->fullName()->data());
         i->funcd = func;
       }

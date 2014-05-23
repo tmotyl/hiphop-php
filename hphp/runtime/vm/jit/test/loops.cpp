@@ -28,6 +28,8 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/code-gen.h"
 
+#include "hphp/runtime/vm/jit/test/test-context.h"
+
 namespace HPHP {  namespace JIT {
 
 // basic liveness of a use of a const inside a loop
@@ -46,13 +48,13 @@ TEST(Loops, Counting) {
   // exit:
   //   Halt
   BCMarker marker = BCMarker::Dummy();
-  IRUnit unit{0};
+  IRUnit unit{test_context};
   auto init = unit.entry();
   auto loop = unit.defBlock();
   auto exit = unit.defBlock();
   auto back = unit.defBlock();
 
-  auto loop_label = unit.defLabel(2, marker);
+  auto loop_label = unit.defLabel(2, marker, {0, 0});
   loop->push_back(loop_label);
 
   auto cnt0 = unit.cns(0);
@@ -98,13 +100,13 @@ TEST(Loops, ComputeLive) {
   // exit:
   //   Halt
   BCMarker marker = BCMarker::Dummy();
-  IRUnit unit{0};
+  IRUnit unit{test_context};
   auto init = unit.entry();
   auto loop = unit.defBlock();
   auto exit = unit.defBlock();
   auto back = unit.defBlock();
 
-  auto loop_label = unit.defLabel(2, marker);
+  auto loop_label = unit.defLabel(2, marker, {0, 0});
   loop->push_back(loop_label);
 
   auto cnt0 = unit.cns(0);

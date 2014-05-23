@@ -148,10 +148,9 @@ void raise_error_sd(const StringData* sd);
 
 RefData* closureStaticLocInit(StringData* name, ActRec* fp, TypedValue val);
 
-int64_t ak_exist_string(ArrayData* arr, StringData* key);
-int64_t ak_exist_int(ArrayData* arr, int64_t key);
-int64_t ak_exist_string_obj(ObjectData* obj, StringData* key);
-int64_t ak_exist_int_obj(ObjectData* obj, int64_t key);
+bool ak_exist_string(ArrayData* arr, StringData* key);
+bool ak_exist_string_obj(ObjectData* obj, StringData* key);
+bool ak_exist_int_obj(ObjectData* obj, int64_t key);
 
 TypedValue arrayIdxI(ArrayData*, int64_t, TypedValue);
 TypedValue arrayIdxS(ArrayData*, StringData*, TypedValue);
@@ -197,6 +196,7 @@ void fpushCufHelperArray(ArrayData*, ActRec* preLiveAR, ActRec* fp);
 void fpushCufHelperString(StringData*, ActRec* preLiveAR, ActRec* fp);
 
 const Func* lookupUnknownFunc(const StringData*);
+const Func* lookupFallbackFunc(const StringData*, const StringData*);
 
 Class* lookupKnownClass(Class** cache, const StringData* clsName);
 

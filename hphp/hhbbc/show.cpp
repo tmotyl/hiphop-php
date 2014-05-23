@@ -350,6 +350,7 @@ std::string show(const Bytecode& bc) {
 #define IMM_IA(n)      folly::toAppend(" iter:", data.iter##n->id, &ret);
 #define IMM_DA(n)      folly::toAppend(" ", data.dbl##n, &ret);
 #define IMM_SA(n)      folly::toAppend(" ", escaped_string(data.str##n), &ret);
+#define IMM_RATA(n)    folly::toAppend(" ", show(data.rat), &ret);
 #define IMM_AA(n)      ret += " " + array_string(data.arr##n);
 #define IMM_BA(n)      folly::toAppend(" <blk:", data.target->id, ">", &ret);
 #define IMM_OA_IMPL(n) /* empty */
@@ -387,6 +388,7 @@ std::string show(const Bytecode& bc) {
 #undef IMM_IA
 #undef IMM_DA
 #undef IMM_SA
+#undef IMM_RATA
 #undef IMM_AA
 #undef IMM_BA
 #undef IMM_OA_IMPL
@@ -483,6 +485,7 @@ std::string show(Type t) {
     return ret;
   case DataTag::Obj:
   case DataTag::Cls:
+  case DataTag::RefInner:
   case DataTag::ArrPacked:
   case DataTag::ArrPackedN:
   case DataTag::ArrStruct:
@@ -507,23 +510,26 @@ std::string show(Type t) {
     break;
   case DataTag::Obj:
     switch (t.m_data.dobj.type) {
-    case DObj::Exact:
+    case ClsTag::Exact:
       folly::toAppend("=", show(t.m_data.dobj.cls), &ret);
       break;
-    case DObj::Sub:
+    case ClsTag::Sub:
       folly::toAppend("<=", show(t.m_data.dobj.cls), &ret);
       break;
     }
     break;
   case DataTag::Cls:
     switch (t.m_data.dcls.type) {
-    case DCls::Exact:
+    case ClsTag::Exact:
       folly::toAppend("=", show(t.m_data.dcls.cls), &ret);
       break;
-    case DCls::Sub:
+    case ClsTag::Sub:
       folly::toAppend("<=", show(t.m_data.dcls.cls), &ret);
       break;
     }
+    break;
+  case DataTag::RefInner:
+    folly::toAppend("(", show(*t.m_data.inner), ")", &ret);
     break;
   case DataTag::None:
     break;

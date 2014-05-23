@@ -92,9 +92,9 @@ void emitBindJ(CodeBlock& cb, CodeBlock& stubs,
   mcg->setJmpTransID(toSmash);
 
   TCA sr = (req == JIT::REQ_BIND_JMP
-            ? emitEphemeralServiceReq(mcg->code.stubs(), mcg->getFreeStub(),
+            ? emitEphemeralServiceReq(stubs, mcg->getFreeStub(stubs),
                                       req, toSmash, dest.toAtomicInt())
-            : emitServiceReq(mcg->code.stubs(), req, toSmash,
+            : emitServiceReq(stubs, req, toSmash,
                              dest.toAtomicInt()));
 
   Asm a { cb };
@@ -147,7 +147,7 @@ int32_t emitNativeImpl(CodeBlock& mainCode, const Func* func) {
   Offset pcOffset = 0;  // NativeImpl is the only instruction in the func
   Offset stackOff = func->numLocals(); // Builtin stubs have no
                                        // non-arg locals
-  mcg->fixupMap().recordSyncPoint(mainCode.frontier(), pcOffset, stackOff);
+  mcg->recordSyncPoint(mainCode.frontier(), pcOffset, stackOff);
 
   /*
    * The native implementation already put the return value on the
@@ -273,8 +273,6 @@ emitServiceReqWork(CodeBlock& cb, TCA start, bool persist, SRFlags flags,
     as.  ret();
   }
 
-  // TODO(2796856): we should record an OpServiceRequest pseudo-bytecode here.
-
   if (debug) {
     // not reached
     as.ud2();
@@ -318,8 +316,7 @@ int32_t emitBindCall(CodeBlock& mainCode, CodeBlock& stubsCode,
     assert(funcd->numIterators() == 0);
     Asm a { mainCode };
     emitLea(a, rVmSp[cellsToBytes(numArgs)], rVmFp);
-    emitCheckSurpriseFlagsEnter(mainCode, stubsCode, true, mcg->fixupMap(),
-                                Fixup(0, numArgs));
+    emitCheckSurpriseFlagsEnter(mainCode, stubsCode, Fixup(0, numArgs));
     // rVmSp is already correctly adjusted, because there's no locals
     // other than the arguments passed.
     auto retval = emitNativeImpl(mainCode, funcd);
@@ -328,7 +325,7 @@ int32_t emitBindCall(CodeBlock& mainCode, CodeBlock& stubsCode,
   }
 
   Asm a { mainCode };
-  if (debug) {
+  if (debug && RuntimeOption::EvalHHIRGenerateAsserts) {
     auto off = cellsToBytes(numArgs) + AROFF(m_savedRip);
     emitImmStoreq(a, kUninitializedRIP, rVmSp[off]);
   }

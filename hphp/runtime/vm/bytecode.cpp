@@ -35,6 +35,9 @@
 #include "hphp/runtime/base/tv-arith.h"
 #include "hphp/compiler/builtin_symbols.h"
 #include "hphp/runtime/vm/event-hook.h"
+#include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/repo-global-data.h"
+#include "hphp/runtime/base/repo-auth-type-codec.h"
 #include "hphp/runtime/vm/func-inline.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/translator.h"
@@ -70,14 +73,13 @@
 #include "hphp/runtime/ext/ext_math.h"
 #include "hphp/runtime/ext/ext_string.h"
 #include "hphp/runtime/ext/ext_closure.h"
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/ext/ext_function.h"
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 #include "hphp/runtime/ext/ext_array.h"
 #include "hphp/runtime/ext/ext_apc.h"
 #include "hphp/runtime/ext/asio/async_function_wait_handle.h"
-#include "hphp/runtime/ext/asio/static_result_wait_handle.h"
-#include "hphp/runtime/ext/asio/static_exception_wait_handle.h"
+#include "hphp/runtime/ext/asio/static_wait_handle.h"
 #include "hphp/runtime/ext/asio/wait_handle.h"
 #include "hphp/runtime/ext/asio/waitable_wait_handle.h"
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
@@ -833,13 +835,13 @@ TypedValue* Stack::resumableStackBase(const ActRec* fp) {
     // that becomes part of the generator's stack. So we find the caller's FP,
     // compensate for its locals and iterators, and then we've found the base
     // of the generator's stack.
-    assert(fp->func()->isGenerator());
+    assert(fp->func()->isNonAsyncGenerator());
     return (TypedValue*)sfp - sfp->func()->numSlotsInFrame();
   } else {
     // The reentrant case occurs when asio scheduler resumes an async function.
     // We simply use the top of stack of the previous VM frame (since the
     // ActRec, locals, and iters for this frame do not reside on the VM stack).
-    assert(fp->func()->isAsync());
+    assert(fp->func()->isAsyncFunction());
     return g_context.getNoCheck()->m_nestedVMs.back().sp;
   }
 }
@@ -1376,7 +1378,7 @@ void ExecutionContext::shuffleMagicArgs(ActRec* ar) {
 
 // This helper only does a stack overflow check for the native stack
 static inline void checkNativeStack() {
-  ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
+  auto const info = ThreadInfo::s_threadInfo.getNoCheck();
   // Check whether func's maximum stack usage would overflow the stack.
   // Both native and VM stack overflows are independently possible.
   if (!stack_in_bounds(info)) {
@@ -1385,14 +1387,28 @@ static inline void checkNativeStack() {
   }
 }
 
-// This helper does a stack overflow check on *both* the native stack
-// and the VM stack.
-static inline void checkStack(Stack& stk, const Func* f) {
-  ThreadInfo* info = ThreadInfo::s_threadInfo.getNoCheck();
-  // Check whether func's maximum stack usage would overflow the stack.
-  // Both native and VM stack overflows are independently possible.
-  if (!stack_in_bounds(info) ||
-      stk.wouldOverflow(f->maxStackCells() + kStackCheckPadding)) {
+/*
+ * This helper does a stack overflow check on *both* the native stack
+ * and the VM stack.
+ *
+ * In some cases for re-entry, we're checking for space other than
+ * just the callee, and `extraCells' may need to be passed with a
+ * non-zero value.  (We over-check in these situations, but it's fine.)
+ */
+ALWAYS_INLINE
+static void checkStack(Stack& stk, const Func* f, int32_t extraCells) {
+  auto const info = ThreadInfo::s_threadInfo.getNoCheck();
+  /*
+   * Check whether func's maximum stack usage would overflow the stack.
+   * Both native and VM stack overflows are independently possible.
+   *
+   * All stack checks are inflated by kStackCheckPadding to ensure
+   * there is space both for calling leaf functions /and/ for
+   * re-entry.  (See kStackCheckReenterPadding and
+   * kStackCheckLeafPadding.)
+   */
+  auto limit = f->maxStackCells() + kStackCheckPadding + extraCells;
+  if (!stack_in_bounds(info) || stk.wouldOverflow(limit)) {
     TRACE(1, "Maximum stack depth exceeded.\n");
     raise_error("Stack overflow");
   }
@@ -1681,7 +1697,7 @@ void ExecutionContext::enterVMAtAsyncFunc(ActRec* enterFnAr,
                                           Resumable* resumable,
                                           ObjectData* exception) {
   assert(enterFnAr);
-  assert(enterFnAr->func()->isAsync());
+  assert(enterFnAr->func()->isAsyncFunction());
   assert(enterFnAr->resumed());
   assert(resumable);
 
@@ -1730,7 +1746,7 @@ void ExecutionContext::enterVMAtFunc(ActRec* enterFnAr, StackArgsState stk) {
 
   prepareFuncEntry(enterFnAr, m_pc, stk);
   if (!EventHook::FunctionEnter(enterFnAr, EventHook::NormalFunc)) return;
-  checkStack(m_stack, enterFnAr->m_func);
+  checkStack(m_stack, enterFnAr->m_func, 0);
   assert(m_fp->func()->contains(m_pc));
 
   if (useJit) {
@@ -1869,20 +1885,27 @@ void ExecutionContext::invokeFunc(TypedValue* retval,
   // If we are inheriting a variable environment then args_ must be empty
   assert(!varEnv || cellIsNull(&args) || !getContainerSize(args));
 
+  Cell* originalSP = m_stack.top();
+
   VMRegAnchor _;
+  DEBUG_ONLY Cell* reentrySP = m_stack.top();
 
   if (this_ != nullptr) {
     this_->incRefCount();
   }
-  Cell* savedSP = m_stack.top();
 
+  // We must do a stack overflow check for leaf functions on re-entry,
+  // because we won't have checked that the stack is deep enough for a
+  // leaf function /after/ re-entry, and the prologue for the leaf
+  // function will not make a check.
   if (f->attrs() & AttrPhpLeafFn ||
-      f->numParams() > kStackCheckReenterPadding - kNumActRecCells) {
-    // Check both the native stack and VM stack for overflow
-    checkStack(m_stack, f);
+      !(f->numParams() + kNumActRecCells <= kStackCheckReenterPadding)) {
+    // Check both the native stack and VM stack for overflow.
+    checkStack(m_stack, f,
+      kNumActRecCells /* numParams is included in f->maxStackCells */);
   } else {
     // invokeFunc() must always check the native stack for overflow no
-    // matter what
+    // matter what.
     checkNativeStack();
   }
 
@@ -1939,8 +1962,11 @@ void ExecutionContext::invokeFunc(TypedValue* retval,
     }
   }
 
-  pushVMState(savedSP);
-  SCOPE_EXIT { popVMState(); };
+  pushVMState(originalSP);
+  SCOPE_EXIT {
+    assert(m_stack.top() == reentrySP);
+    popVMState();
+  };
 
   enterVM(ar, varEnv ? StackArgsState::Untrimmed : StackArgsState::Trimmed);
 
@@ -1968,21 +1994,25 @@ void ExecutionContext::invokeFuncFew(TypedValue* retval,
   assert(!invName || f->name()->isame(s___call.get()) ||
          f->name()->isame(s___callStatic.get()));
 
+  Cell* originalSP = m_stack.top();
+
   VMRegAnchor _;
+  DEBUG_ONLY Cell* reentrySP = m_stack.top();
 
-  if (ObjectData* thiz = ActRec::decodeThis(thisOrCls)) {
-    thiz->incRefCount();
-  }
-  Cell* savedSP = m_stack.top();
-
+  // See similar block of code above for why this is needed on
+  // AttrPhpLeafFn.
   if (f->attrs() & AttrPhpLeafFn ||
-      argc > kStackCheckReenterPadding - kNumActRecCells) {
+      !(argc + kNumActRecCells <= kStackCheckReenterPadding)) {
     // Check both the native stack and VM stack for overflow
-    checkStack(m_stack, f);
+    checkStack(m_stack, f, argc + kNumActRecCells);
   } else {
     // invokeFuncFew() must always check the native stack for overflow
     // no matter what
     checkNativeStack();
+  }
+
+  if (ObjectData* thiz = ActRec::decodeThis(thisOrCls)) {
+    thiz->incRefCount();
   }
 
   ActRec* ar = m_stack.allocA();
@@ -2017,8 +2047,11 @@ void ExecutionContext::invokeFuncFew(TypedValue* retval,
     }
   }
 
-  pushVMState(savedSP);
-  SCOPE_EXIT { popVMState(); };
+  pushVMState(originalSP);
+  SCOPE_EXIT {
+    assert(m_stack.top() == reentrySP);
+    popVMState();
+  };
 
   enterVM(ar, StackArgsState::Untrimmed);
 
@@ -2028,13 +2061,15 @@ void ExecutionContext::invokeFuncFew(TypedValue* retval,
 
 void ExecutionContext::resumeAsyncFunc(Resumable* resumable,
                                        ObjectData* freeObj,
-                                       Cell& awaitResult) {
+                                       const Cell& awaitResult) {
   assert(tl_regState == VMRegState::CLEAN);
   SCOPE_EXIT { assert(tl_regState == VMRegState::CLEAN); };
 
   auto fp = resumable->actRec();
   fp->setReturnVMExit();
-  checkStack(m_stack, fp->func());
+  // We don't need to check for space for the ActRec (unlike generally
+  // in normal re-entry), because the ActRec isn't on the stack.
+  checkStack(m_stack, fp->func(), 0);
 
   Cell* savedSP = m_stack.top();
   cellDup(awaitResult, *m_stack.allocC());
@@ -2058,7 +2093,7 @@ void ExecutionContext::resumeAsyncFuncThrow(Resumable* resumable,
 
   auto fp = resumable->actRec();
   fp->setReturnVMExit();
-  checkStack(m_stack, fp->func());
+  checkStack(m_stack, fp->func(), 0);
 
   // decref after we hold reference to the exception
   Object e(exception);
@@ -2095,7 +2130,7 @@ ActRec* ExecutionContext::getPrevVMState(const ActRec* fp,
   if (LIKELY(prevFp != nullptr)) {
     if (prevSp) {
       if (UNLIKELY(fp->resumed())) {
-        assert(fp->func()->isGenerator());
+        assert(fp->func()->isNonAsyncGenerator());
         *prevSp = (TypedValue*)prevFp - prevFp->func()->numSlotsInFrame();
       } else {
         *prevSp = (TypedValue*)(fp + 1);
@@ -2123,6 +2158,25 @@ ActRec* ExecutionContext::getPrevVMState(const ActRec* fp,
   }
   if (fromVMEntry) *fromVMEntry = true;
   return prevFp;
+}
+
+void ExecutionContext::nullOutReturningActRecs() {
+  VMRegAnchor _;
+  ActRec* fp = getFP();
+  if (!fp) return;
+  Offset pc = 0;
+  auto const curOp = *reinterpret_cast<const Op*>(getPC());
+  if (curOp == Op::RetC || curOp == Op::RetV) {
+    fp->setThisOrClassAllowNull(nullptr);
+  }
+  while (ActRec* prevFp = getPrevVMState(fp, &pc)) {
+    auto const curOp =
+      *reinterpret_cast<const Op*>(prevFp->m_func->unit()->at(pc));
+    if (curOp == Op::RetC || curOp == Op::RetV) {
+      prevFp->setThisOrClassAllowNull(nullptr);
+    }
+    fp = prevFp;
+  }
 }
 
 Array ExecutionContext::debugBacktrace(bool skip /* = false */,
@@ -2184,11 +2238,11 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
         Offset off = pc;
 
         ArrayInit frame(parserFrame ? 4 : 2, ArrayInit::Map{});
-        frame.set(s_file, filename, true);
-        frame.set(s_line, unit->getLineNumber(off), true);
+        frame.set(s_file, filename);
+        frame.set(s_line, unit->getLineNumber(off));
         if (parserFrame) {
-          frame.set(s_function, s_include, true);
-          frame.set(s_args, Array::Create(parserFrame->filename), true);
+          frame.set(s_function, s_include);
+          frame.set(s_args, Array::Create(parserFrame->filename));
         }
         bt.append(frame.toVariant());
         depth++;
@@ -2222,7 +2276,7 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
         prevFile = prevFp->m_func->originalFilename();
       }
       assert(prevFile);
-      frame.set(s_file, const_cast<StringData*>(prevFile), true);
+      frame.set(s_file, const_cast<StringData*>(prevFile));
 
       // In the normal method case, the "saved pc" for line number printing is
       // pointing at the cell conversion (Unbox/Pop) instruction, not the call
@@ -2239,8 +2293,7 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
         pcAdjust = 1;
       }
       frame.set(s_line,
-                prevFp->m_func->unit()->getLineNumber(prevPc - pcAdjust),
-                true);
+                prevFp->m_func->unit()->getLineNumber(prevPc - pcAdjust));
     }
 
     // check for include
@@ -2257,20 +2310,20 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
       funcname = s_include;
     }
 
-    frame.set(s_function, funcname, true);
+    frame.set(s_function, funcname);
 
     if (!funcname.same(s_include)) {
       // Closures have an m_this but they aren't in object context
       Class* ctx = arGetContextClass(fp);
       if (ctx != nullptr && !fp->m_func->isClosureBody()) {
-        frame.set(s_class, ctx->name()->data(), true);
+        frame.set(s_class, ctx->name()->data());
         if (fp->hasThis() && !isReturning) {
           if (withThis) {
-            frame.set(s_object, Object(fp->getThis()), true);
+            frame.set(s_object, Object(fp->getThis()));
           }
-          frame.set(s_type, "->", true);
+          frame.set(s_type, "->");
         } else {
-          frame.set(s_type, "::", true);
+          frame.set(s_type, "::");
         }
       }
     }
@@ -2281,11 +2334,11 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
     } else if (funcname.same(s_include)) {
       if (depth) {
         args.append(const_cast<StringData*>(curUnit->filepath()));
-        frame.set(s_args, args, true);
+        frame.set(s_args, args);
       }
     } else if (!RuntimeOption::EnableArgsInBacktraces || isReturning) {
       // Provide an empty 'args' array to be consistent with hphpc
-      frame.set(s_args, args, true);
+      frame.set(s_args, args);
     } else {
       const int nparams = fp->m_func->numNonVariadicParams();
       int nargs = fp->numArgs();
@@ -2314,7 +2367,7 @@ Array ExecutionContext::debugBacktrace(bool skip /* = false */,
           args.append(tvAsVariant(arg));
         }
       }
-      frame.set(s_args, args, true);
+      frame.set(s_args, args);
     }
 
     bt.append(frame.toVariant());
@@ -2612,7 +2665,7 @@ bool ExecutionContext::evalUnit(Unit* unit, PC& pc, int funcType) {
   SYNC();
   bool ret = EventHook::FunctionEnter(m_fp, funcType);
   pc = m_pc;
-  checkStack(m_stack, func);
+  checkStack(m_stack, func, 0);
   return ret;
 }
 
@@ -3859,15 +3912,43 @@ OPTBLD_INLINE void ExecutionContext::iopConcat(IOP_ARGS) {
   NEXT();
   Cell* c1 = m_stack.topC();
   Cell* c2 = m_stack.indC(1);
-  if (IS_STRING_TYPE(c1->m_type) && IS_STRING_TYPE(c2->m_type)) {
-    cellAsVariant(*c2) = concat(
-      cellAsVariant(*c2).toString(), cellAsCVarRef(*c1).toString());
-  } else {
-    cellAsVariant(*c2) = concat(cellAsVariant(*c2).toString(),
-                                cellAsCVarRef(*c1).toString());
-  }
+
+  cellAsVariant(*c2) = concat(cellAsVariant(*c2).toString(),
+                              cellAsCVarRef(*c1).toString());
   assert_refcount_realistic_nz(c2->m_data.pstr->getCount());
   m_stack.popC();
+}
+
+OPTBLD_INLINE void ExecutionContext::iopConcatN(IOP_ARGS) {
+  NEXT();
+  DECODE_IVA(n);
+
+  Cell* c1 = m_stack.topC();
+  Cell* c2 = m_stack.indC(1);
+
+  if (n == 2) {
+    cellAsVariant(*c2) = concat(cellAsVariant(*c2).toString(),
+                                cellAsCVarRef(*c1).toString());
+    assert_refcount_realistic_nz(c2->m_data.pstr->getCount());
+  } else if (n == 3) {
+    Cell* c3 = m_stack.indC(2);
+    cellAsVariant(*c3) = concat3(cellAsVariant(*c3).toString(),
+                                 cellAsCVarRef(*c2).toString(),
+                                 cellAsCVarRef(*c1).toString());
+    assert_refcount_realistic_nz(c3->m_data.pstr->getCount());
+  } else /* n == 4 */ {
+    Cell* c3 = m_stack.indC(2);
+    Cell* c4 = m_stack.indC(3);
+    cellAsVariant(*c4) = concat4(cellAsVariant(*c4).toString(),
+                                 cellAsCVarRef(*c3).toString(),
+                                 cellAsCVarRef(*c2).toString(),
+                                 cellAsCVarRef(*c1).toString());
+    assert_refcount_realistic_nz(c4->m_data.pstr->getCount());
+  }
+
+  for (int i = 1; i < n; ++i) {
+    m_stack.popC();
+  }
 }
 
 OPTBLD_INLINE void ExecutionContext::iopNot(IOP_ARGS) {
@@ -3931,6 +4012,10 @@ OPTBLD_INLINE void ExecutionContext::iopMulO(IOP_ARGS) {
 
 OPTBLD_INLINE void ExecutionContext::iopDiv(IOP_ARGS) {
   implCellBinOp(IOP_PASS_ARGS, cellDiv);
+}
+
+OPTBLD_INLINE void ExecutionContext::iopPow(IOP_ARGS) {
+  implCellBinOp(IOP_PASS_ARGS, cellPow);
 }
 
 OPTBLD_INLINE void ExecutionContext::iopMod(IOP_ARGS) {
@@ -4457,10 +4542,10 @@ OPTBLD_INLINE void ExecutionContext::iopSSwitch(IOP_ARGS) {
 
 OPTBLD_INLINE void ExecutionContext::ret(IOP_ARGS) {
   // If in an eagerly executed async function, wrap the return value
-  // with a StaticResultWaitHandle.
-  if (UNLIKELY(!m_fp->resumed() && m_fp->func()->isAsync())) {
+  // into succeeded StaticWaitHandle.
+  if (UNLIKELY(!m_fp->resumed() && m_fp->func()->isAsyncFunction())) {
     auto const top = m_stack.topC();
-    top->m_data.pobj = c_StaticResultWaitHandle::CreateFromVM(*top);
+    top->m_data.pobj = c_StaticWaitHandle::CreateSucceededVM(*top);
     top->m_type = KindOfObject;
   }
 
@@ -4488,16 +4573,14 @@ OPTBLD_INLINE void ExecutionContext::ret(IOP_ARGS) {
     m_stack.ret();
     *m_stack.topTV() = retval;
     assert(m_stack.topTV() == &m_fp->m_r);
-  } else if (m_fp->func()->isAsync()) {
+  } else if (m_fp->func()->isAsyncFunction()) {
     // Mark the async function as succeeded and store the return value.
     assert(!sfp);
-    auto waitHandle = frame_afwh(m_fp);
-    waitHandle->setState(c_AsyncFunctionWaitHandle::STATE_SUCCEEDED);
-    cellCopy(retval, waitHandle->getResult());
-  } else if (m_fp->func()->isGenerator()) {
+    frame_afwh(m_fp)->ret(retval);
+  } else if (m_fp->func()->isNonAsyncGenerator()) {
     // Mark the generator as finished and store the return value.
     assert(IS_NULL_TYPE(retval.m_type));
-    frame_continuation(m_fp)->finish();
+    frame_generator(m_fp)->finish();
   } else {
     not_reached();
   }
@@ -4515,7 +4598,7 @@ OPTBLD_INLINE void ExecutionContext::iopRetC(IOP_ARGS) {
 OPTBLD_INLINE void ExecutionContext::iopRetV(IOP_ARGS) {
   NEXT();
   assert(!m_fp->resumed());
-  assert(!m_fp->func()->isAsync());
+  assert(!m_fp->func()->isResumable());
   ret(IOP_PASS_ARGS);
 }
 
@@ -4912,174 +4995,47 @@ OPTBLD_INLINE void ExecutionContext::iopIsTypeC(IOP_ARGS) {
   topTv->m_type = KindOfBoolean;
 }
 
-OPTBLD_INLINE static void implAssertT(TypedValue* tv, AssertTOp op) {
-  switch (op) {
-  case AssertTOp::Uninit:
-    assert(tv->m_type == KindOfUninit);
-    break;
-  case AssertTOp::InitNull:
-    assert(tv->m_type == KindOfNull);
-    break;
-  case AssertTOp::Null:
-    assert(IS_NULL_TYPE(tv->m_type));
-    break;
-  case AssertTOp::Int:
-    assert(tv->m_type == KindOfInt64);
-    break;
-  case AssertTOp::OptInt:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfInt64);
-    break;
-  case AssertTOp::Dbl:
-    assert(tv->m_type == KindOfDouble);
-    break;
-  case AssertTOp::OptDbl:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfDouble);
-    break;
-  case AssertTOp::Bool:
-    assert(tv->m_type == KindOfBoolean);
-    break;
-  case AssertTOp::OptBool:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfBoolean);
-    break;
-  case AssertTOp::Res:
-    assert(tv->m_type == KindOfResource);
-    break;
-  case AssertTOp::OptRes:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfResource);
-    break;
-  case AssertTOp::SStr:
-    assert(IS_STRING_TYPE(tv->m_type) && tv->m_data.pstr->isStatic());
-    break;
-  case AssertTOp::OptSStr:
-    assert(tv->m_type == KindOfNull ||
-           (IS_STRING_TYPE(tv->m_type) && tv->m_data.pstr->isStatic()));
-    break;
-  case AssertTOp::Str:
-    assert(IS_STRING_TYPE(tv->m_type));
-    break;
-  case AssertTOp::OptStr:
-    assert(tv->m_type == KindOfNull || IS_STRING_TYPE(tv->m_type));
-    break;
-  case AssertTOp::SArr:
-    assert(tv->m_type == KindOfArray && tv->m_data.parr->isStatic());
-    break;
-  case AssertTOp::OptSArr:
-    assert(tv->m_type == KindOfNull ||
-           (tv->m_type == KindOfArray && tv->m_data.parr->isStatic()));
-    break;
-  case AssertTOp::Arr:
-    assert(tv->m_type == KindOfArray);
-    break;
-  case AssertTOp::OptArr:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfArray);
-    break;
-  case AssertTOp::Obj:
-    assert(tv->m_type == KindOfObject);
-    break;
-  case AssertTOp::OptObj:
-    assert(tv->m_type == KindOfNull || tv->m_type == KindOfObject);
-    break;
-  case AssertTOp::InitUnc:
-    assert(tv->m_type != KindOfUninit);
-    /* fallthrough */
-  case AssertTOp::Unc:
-    assert(
-      !IS_REFCOUNTED_TYPE(tv->m_type) ||
-      (tv->m_type == KindOfString && tv->m_data.pstr->isStatic()) ||
-      (tv->m_type == KindOfArray  && tv->m_data.parr->isStatic())
+OPTBLD_INLINE void ExecutionContext::iopAssertRATL(IOP_ARGS) {
+  NEXT();
+  DECODE_LA(localId);
+  if (debug) {
+    auto const rat = decodeRAT(m_fp->m_func->unit(), pc);
+    auto const tv = *frame_local(m_fp, localId);
+    auto const func = m_fp->func();
+    always_assert_flog(
+      tvMatchesRepoAuthType(tv, rat),
+      "failed assert RATL on local {}: ${} in {}:{}, expected {}, got {}",
+      localId,
+      localId < func->numNamedLocals() ? func->localNames()[localId]->data()
+                                       : "<unnamed>",
+      getContainingFileName().data(),
+      getLine(),
+      show(rat),
+      tv.pretty()
     );
-    break;
-  case AssertTOp::InitCell:
-    assert(tv->m_type != KindOfUninit && tv->m_type != KindOfRef);
-    break;
-  case AssertTOp::Cell:
-    assert(tv->m_type != KindOfRef);
-    break;
-  case AssertTOp::Ref:
-    assert(tv->m_type == KindOfRef);
-    break;
-  }
-}
-
-OPTBLD_INLINE void ExecutionContext::iopAssertTL(IOP_ARGS) {
-  NEXT();
-  DECODE_LA(localId);
-  DECODE_OA(AssertTOp, op);
-  implAssertT(frame_local(m_fp, localId), op);
-}
-
-OPTBLD_INLINE void ExecutionContext::iopAssertTStk(IOP_ARGS) {
-  NEXT();
-  DECODE_IVA(stkSlot);
-  DECODE_OA(AssertTOp, op);
-  implAssertT(m_stack.indTV(stkSlot), op);
-}
-
-OPTBLD_INLINE void ExecutionContext::iopPredictTL(IOP_ARGS) {
-  NEXT();
-  DECODE_LA(localId);
-  DECODE_OA(AssertTOp, op);
-}
-
-OPTBLD_INLINE void ExecutionContext::iopPredictTStk(IOP_ARGS) {
-  NEXT();
-  DECODE_IVA(stkSlot);
-  DECODE_OA(AssertTOp, op);
-}
-
-OPTBLD_INLINE static void implAssertObj(TypedValue* tv,
-                                        const StringData* str,
-                                        AssertObjOp subop) {
-  DEBUG_ONLY auto const cls = Unit::lookupClass(str);
-  auto cls_defined = [&] {
-    assert(cls && "asserted class was not defined at AssertObj{L,Stk}");
-  };
-
-  switch (subop) {
-  case AssertObjOp::Exact:
-    assert(tv->m_type == KindOfObject);
-    cls_defined();
-    assert(tv->m_data.pobj->getVMClass() == cls);
-    return;
-  case AssertObjOp::Sub:
-    assert(tv->m_type == KindOfObject);
-    cls_defined();
-    assert(tv->m_data.pobj->getVMClass()->classof(cls));
-    return;
-  case AssertObjOp::OptExact:
-    assert(tv->m_type == KindOfObject || tv->m_type == KindOfNull);
-    if (tv->m_type == KindOfObject) {
-      cls_defined();
-      assert(tv->m_data.pobj->getVMClass() == cls);
-    }
-    return;
-  case AssertObjOp::OptSub:
-    assert(tv->m_type == KindOfObject || tv->m_type == KindOfNull);
-    if (tv->m_type == KindOfObject) {
-      cls_defined();
-      assert(tv->m_data.pobj->getVMClass()->classof(cls));
-    }
     return;
   }
-  not_reached();
+  pc += encodedRATSize(pc);
 }
 
-OPTBLD_INLINE void ExecutionContext::iopAssertObjL(IOP_ARGS) {
-  NEXT();
-  DECODE_LA(localId);
-  DECODE(Id, strId);
-  DECODE_OA(AssertObjOp, subop);
-  auto const str = m_fp->m_func->unit()->lookupLitstrId(strId);
-  implAssertObj(frame_local(m_fp, localId), str, subop);
-}
-
-OPTBLD_INLINE void ExecutionContext::iopAssertObjStk(IOP_ARGS) {
+OPTBLD_INLINE void ExecutionContext::iopAssertRATStk(IOP_ARGS) {
   NEXT();
   DECODE_IVA(stkSlot);
-  DECODE(Id, strId);
-  DECODE_OA(AssertObjOp, subop);
-  auto const str = m_fp->m_func->unit()->lookupLitstrId(strId);
-  implAssertObj(m_stack.indTV(stkSlot), str, subop);
+  if (debug) {
+    auto const rat = decodeRAT(m_fp->m_func->unit(), pc);
+    auto const tv = *m_stack.indTV(stkSlot);
+    always_assert_flog(
+      tvMatchesRepoAuthType(tv, rat),
+      "failed assert RATStk {} in {}:{}, expected {}, got {}",
+      stkSlot,
+      getContainingFileName().data(),
+      getLine(),
+      show(rat),
+      tv.pretty()
+    );
+    return;
+  }
+  pc += encodedRATSize(pc);
 }
 
 OPTBLD_INLINE void ExecutionContext::iopBreakTraceHint(IOP_ARGS) {
@@ -6282,7 +6238,7 @@ OPTBLD_INLINE void ExecutionContext::iopFCall(IOP_ARGS) {
   NEXT();
   DECODE_IVA(numArgs);
   assert(numArgs == ar->numArgs());
-  checkStack(m_stack, ar->m_func);
+  checkStack(m_stack, ar->m_func, 0);
   ar->setReturn(m_fp, pc, tx->uniqueStubs.retHelper);
   doFCall(ar, pc);
   if (RuntimeOption::EvalRuntimeTypeProfile) {
@@ -6303,7 +6259,7 @@ OPTBLD_INLINE void ExecutionContext::iopFCallD(IOP_ARGS) {
     assert(ar->m_func->name()->isame(funcName));
   }
   assert(numArgs == ar->numArgs());
-  checkStack(m_stack, ar->m_func);
+  checkStack(m_stack, ar->m_func, 0);
   ar->setReturn(m_fp, pc, tx->uniqueStubs.retHelper);
   doFCall(ar, pc);
   if (RuntimeOption::EvalRuntimeTypeProfile) {
@@ -6368,7 +6324,7 @@ bool ExecutionContext::doFCallArray(PC& pc) {
     Cell args = *c1;
     m_stack.discard(); // prepareArrayArgs will push arguments onto the stack
     SCOPE_EXIT { tvRefcountedDecRef(&args); };
-    checkStack(m_stack, func);
+    checkStack(m_stack, func, 0);
 
     assert(!ar->resumed());
     TRACE(3, "FCallArray: pc %p func %p base %d\n", m_pc,
@@ -7013,7 +6969,7 @@ const StaticString s_this("this");
 // The variable environment, extra args and all locals are teleported
 // from the ActRec on the evaluation stack to the suspended ActRec
 // on the heap.
-void ExecutionContext::fillContinuationVars(const Func* func,
+void ExecutionContext::fillResumableVars(const Func* func,
                                             ActRec* origFp,
                                             ActRec* genFp) {
   for (Id i = 0; i < func->numLocals(); ++i) {
@@ -7035,13 +6991,14 @@ OPTBLD_INLINE void ExecutionContext::iopCreateCont(IOP_ARGS) {
   const auto func = m_fp->func();
   const auto resumeOffset = m_fp->func()->unit()->offsetOf(pc);
 
-  // Create the Continuation object.
-  auto cont = c_Continuation::Create(m_fp, nullptr, resumeOffset);
+  // Create the Generator object.
+  auto cont = c_Generator::Create(m_fp, m_fp->func()->numSlotsInFrame(),
+                                  nullptr, resumeOffset);
 
-  // Teleport local variables into the Continuation.
-  fillContinuationVars(func, m_fp, cont->actRec());
+  // Teleport local variables into the generator.
+  fillResumableVars(func, m_fp, cont->actRec());
 
-  // Call the FunctionExit hook. Keep the Continuation on the stack so that
+  // Call the FunctionExit hook. Keep the generator on the stack so that
   // the unwinder could free it if the hook fails.
   m_stack.pushObjectNoRc(cont);
   EventHook::FunctionExit(m_fp, m_stack.top());
@@ -7062,10 +7019,10 @@ OPTBLD_INLINE void ExecutionContext::iopCreateCont(IOP_ARGS) {
   pc = LIKELY(m_fp != nullptr) ? m_fp->func()->getEntry() + soff : nullptr;
 }
 
-static inline c_Continuation* this_continuation(const ActRec* fp) {
+static inline c_Generator* this_generator(const ActRec* fp) {
   ObjectData* obj = fp->getThis();
-  assert(obj->instanceof(c_Continuation::classof()));
-  return static_cast<c_Continuation*>(obj);
+  assert(obj->instanceof(c_Generator::classof()));
+  return static_cast<c_Generator*>(obj);
 }
 
 OPTBLD_INLINE void ExecutionContext::contEnterImpl(IOP_ARGS) {
@@ -7075,10 +7032,10 @@ OPTBLD_INLINE void ExecutionContext::contEnterImpl(IOP_ARGS) {
   assert(m_stack.top() + 1 ==
          (TypedValue*)m_fp - m_fp->m_func->numSlotsInFrame());
 
-  // Do linkage of the continuation's AR.
+  // Do linkage of the generator's AR.
   assert(m_fp->hasThis());
-  c_Continuation* cont = this_continuation(m_fp);
-  assert(cont->getState() == c_Continuation::Running);
+  c_Generator* cont = this_generator(m_fp);
+  assert(cont->getState() == c_Generator::Running);
   ActRec* contAR = cont->actRec();
   contAR->setReturn(m_fp, pc, tx->uniqueStubs.genRetHelper);
 
@@ -7110,7 +7067,7 @@ OPTBLD_INLINE void ExecutionContext::iopContRaise(IOP_ARGS) {
 OPTBLD_INLINE void ExecutionContext::iopYield(IOP_ARGS) {
   NEXT();
 
-  auto cont = frame_continuation(m_fp);
+  auto cont = frame_generator(m_fp);
   auto resumeOffset = m_fp->func()->unit()->offsetOf(pc);
   cont->suspend(nullptr, resumeOffset, *m_stack.topC());
   m_stack.popTV();
@@ -7127,7 +7084,7 @@ OPTBLD_INLINE void ExecutionContext::iopYield(IOP_ARGS) {
 OPTBLD_INLINE void ExecutionContext::iopYieldK(IOP_ARGS) {
   NEXT();
 
-  auto cont = frame_continuation(m_fp);
+  auto cont = frame_generator(m_fp);
   auto resumeOffset = m_fp->func()->unit()->offsetOf(pc);
   cont->suspend(nullptr, resumeOffset, *m_stack.indC(1), *m_stack.topC());
   m_stack.popTV();
@@ -7145,26 +7102,26 @@ OPTBLD_INLINE void ExecutionContext::iopYieldK(IOP_ARGS) {
 OPTBLD_INLINE void ExecutionContext::iopContCheck(IOP_ARGS) {
   NEXT();
   DECODE_IVA(checkStarted);
-  this_continuation(m_fp)->preNext(checkStarted);
+  this_generator(m_fp)->preNext(checkStarted);
 }
 
 OPTBLD_INLINE void ExecutionContext::iopContValid(IOP_ARGS) {
   NEXT();
   TypedValue* tv = m_stack.allocTV();
   tvWriteUninit(tv);
-  tvAsVariant(tv) = this_continuation(m_fp)->getState() != c_Continuation::Done;
+  tvAsVariant(tv) = this_generator(m_fp)->getState() != c_Generator::Done;
 }
 
 OPTBLD_INLINE void ExecutionContext::iopContKey(IOP_ARGS) {
   NEXT();
-  c_Continuation* cont = this_continuation(m_fp);
+  c_Generator* cont = this_generator(m_fp);
   cont->startedCheck();
   cellDup(cont->m_key, *m_stack.allocC());
 }
 
 OPTBLD_INLINE void ExecutionContext::iopContCurrent(IOP_ARGS) {
   NEXT();
-  c_Continuation* cont = this_continuation(m_fp);
+  c_Generator* cont = this_generator(m_fp);
   cont->startedCheck();
   cellDup(cont->m_value, *m_stack.allocC());
 }
@@ -7186,10 +7143,11 @@ OPTBLD_INLINE void ExecutionContext::asyncSuspendE(IOP_ARGS, int32_t iters) {
 
   // Create the AsyncFunctionWaitHandle object.
   auto waitHandle = static_cast<c_AsyncFunctionWaitHandle*>(
-    c_AsyncFunctionWaitHandle::Create(m_fp, nullptr, resumeOffset, child));
+    c_AsyncFunctionWaitHandle::Create(m_fp, m_fp->func()->numSlotsInFrame(),
+                                      nullptr, resumeOffset, child));
 
   // Teleport local variables into the AsyncFunctionWaitHandle.
-  fillContinuationVars(func, m_fp, waitHandle->actRec());
+  fillResumableVars(func, m_fp, waitHandle->actRec());
 
   // Teleport iterators into the AsyncFunctionWaitHandle.
   memcpy(frame_iter(waitHandle->actRec(), iters - 1),
@@ -7376,6 +7334,28 @@ OPTBLD_INLINE void ExecutionContext::iopTraitExists(IOP_ARGS) {
   classExistsImpl(IOP_PASS_ARGS, AttrTrait);
 }
 
+OPTBLD_INLINE void ExecutionContext::iopSilence(IOP_ARGS) {
+  NEXT();
+  DECODE_LA(localId);
+  DECODE_OA(SilenceOp, subop);
+
+  switch (subop) {
+    case SilenceOp::Start: {
+      auto level = zero_error_level();
+      TypedValue* local = frame_local(m_fp, localId);
+      local->m_type = KindOfInt64;
+      local->m_data.num = level;
+      break;
+    }
+    case SilenceOp::End: {
+      TypedValue* oldTV = frame_local(m_fp, localId);
+      assert(oldTV->m_type == KindOfInt64);
+      restore_error_level(oldTV->m_data.num);
+      break;
+    }
+  }
+}
+
 string
 ExecutionContext::prettyStack(const string& prefix) const {
   if (!getFP()) {
@@ -7477,8 +7457,7 @@ profileReturnValue(const DataType dt) {
 }
 
 template <int dispatchFlags>
-inline void ExecutionContext::dispatchImpl(int numInstrs) {
-  static const bool limInstrs = dispatchFlags & LimitInstrs;
+inline void ExecutionContext::dispatchImpl() {
   static const bool breakOnCtlFlow = dispatchFlags & BreakOnCtlFlow;
   static const bool profile = dispatchFlags & Profile;
   static const void *optabDirect[] = {
@@ -7522,8 +7501,7 @@ inline void ExecutionContext::dispatchImpl(int numInstrs) {
   bool isCtlFlow = false;
 
 #define DISPATCH() do {                                                 \
-    if ((breakOnCtlFlow && isCtlFlow) ||                                \
-        (limInstrs && UNLIKELY(numInstrs-- == 0))) {                    \
+    if (breakOnCtlFlow && isCtlFlow) {                                  \
       ONTRACE(1,                                                        \
               Trace::trace("dispatch: Halt ExecutionContext::dispatch(%p)\n", \
                            m_fp));                                      \
@@ -7578,9 +7556,9 @@ inline void ExecutionContext::dispatchImpl(int numInstrs) {
 
 void ExecutionContext::dispatch() {
   if (shouldProfile()) {
-    dispatchImpl<Profile>(0);
+    dispatchImpl<Profile>();
   } else {
-    dispatchImpl<0>(0);
+    dispatchImpl<0>();
   }
 }
 
@@ -7593,20 +7571,6 @@ void ExecutionContext::switchModeForDebugger() {
   }
 }
 
-void ExecutionContext::dispatchN(int numInstrs) {
-  if (Trace::moduleEnabled(Trace::dispatchN)) {
-    auto cat = makeStaticString("dispatchN");
-    auto name = makeStaticString(
-      folly::format("{} ops @ {}",
-                    numInstrs, show(SrcKey(m_fp->func(), m_pc,
-                                           m_fp->resumed()))).str());
-    Stats::incStatGrouped(cat, name, 1);
-  }
-
-  dispatchImpl<LimitInstrs | BreakOnCtlFlow>(numInstrs);
-  switchModeForDebugger();
-}
-
 void ExecutionContext::dispatchBB() {
   if (Trace::moduleEnabled(Trace::dispatchBB)) {
     auto cat = makeStaticString("dispatchBB");
@@ -7615,7 +7579,7 @@ void ExecutionContext::dispatchBB() {
     Stats::incStatGrouped(cat, name, 1);
   }
 
-  dispatchImpl<BreakOnCtlFlow>(0);
+  dispatchImpl<BreakOnCtlFlow>();
   switchModeForDebugger();
 }
 
@@ -7687,7 +7651,7 @@ void ExecutionContext::popVMState() {
   m_pc = savedVM.pc;
   m_fp = savedVM.fp;
   m_firstAR = savedVM.firstAR;
-  assert(m_stack.top() == savedVM.sp);
+  m_stack.top() = savedVM.sp;
 
   if (debug) {
     if (savedVM.fp &&

@@ -67,7 +67,8 @@ void print(const Block* block);
 void print(std::ostream& ostream, const IRUnit&,
            const RegAllocInfo* regs = nullptr,
            const AsmInfo* asmInfo = nullptr,
-           const GuardConstraints* guards = nullptr);
+           const GuardConstraints* guards = nullptr,
+           bool dotBodies = false);
 void print(const IRUnit& unit);
 
 /*
@@ -84,7 +85,7 @@ static const int kRegAllocLevel = 3;
 static const int kOptLevel = 4;
 static const int kExtraLevel = 6;
 
-void dumpTrace(int level, const IRUnit&, const char* caption,
+void printUnit(int level, const IRUnit&, const char* caption,
                const RegAllocInfo* regs = nullptr, AsmInfo* ai = nullptr,
                const GuardConstraints* guards = nullptr);
 

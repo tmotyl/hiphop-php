@@ -94,6 +94,12 @@
     install_root: facebook-php-sdk
     test_root: facebook-php-sdk
     test_file_regex: /.*(tests\.php)$/
+  fastroute:
+    url: https://github.com/nikic/FastRoute.git
+    branch: master
+    commit: 40c897afe69ed59582b30cb05f437e544ce46bdf
+    install_root: fastroute
+    test_root: fastroute
   guzzle:
     url: https://github.com/guzzle/guzzle3.git
     # Slightly after v3.8.1 - need:
@@ -109,6 +115,9 @@
     commit: c1cf6c8630b71fa7c9b8f7e769758bb1d9147dae
     install_root: guzzle4
     test_root: guzzle4
+  hhvmquickinterp:
+    do_not_install: true
+    test_root: ../hhvm/quick_interp
   idiorm:
     url: https://github.com/j4mie/idiorm.git
     branch: v1.4.1
@@ -179,18 +188,16 @@
       - joomla-framework/src/Joomla/Form/Tests/rule/JFormRuleUrlTest.php
   joomlacms:
     url: https://github.com/joomla/joomla-cms.git
-    branch: "3.2.2"
-    commit: 07d6712836c4520963e78b9fda14b14d13ff000c
+    branch: "3.3-dev"
+    commit: 11b927eb40b6646733ead7a9e3cd5f2e68a289b8
     install_root: joomla-cms
     test_root: joomla-cms
     clowns:
-      - joomla-cms/tests/unit/suites/libraries/cms/pagination/JPaginationTest.php
       - joomla-cms/tests/unit/suites/libraries/cms/toolbar/button/JToolbarButtonHelpTest.php
-      - joomla-cms/tests/unit/suites/libraries/cms/html/JHtmlIconsTest.php
-      - joomla-cms/tests/unit/suites/libraries/legacy/categories/JCategoryNodeTest.php
       - joomla-cms/tests/unit/suites/libraries/joomla/twitter/JTwitterTest.php
-      - joomla-cms/tests/unit/suites/libraries/joomla/document/opensearch/JDocumentOpensearchTest.php
       - joomla-cms/tests/unit/suites/libraries/joomla/cache/storage/JCacheStorageMainTest.php
+      - joomla-cms/tests/unit/suites/libraries/joomla/google/JGoogleDataPicasaAlbumTest.php
+      - joomla-cms/tests/unit/suites/libraries/joomla/google/JGoogleDataPicasaPhotoTest.php
       # Intermittently hang:
       - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldCaptchaTest.php
       - joomla-cms/tests/unit/suites/libraries/cms/form/field/JFormFieldChromestyleTest.php
@@ -287,11 +294,10 @@
     install_root: lessphp
     test_root: lessphp
   magento2:
-    # Until PHPUnit 3.8 pull request is accepted
-    url: https://github.com/JoelMarcey/magento2.git
+    url: https://github.com/magento/magento2.git
     # Master is the only branch
     branch: master
-    commit: 389668bca115e0fed4353664bd8c93d46a69da9e
+    commit: 75b30dbc1ca0a41926784bd4d13fc889914aaa16
     install_root: magento2
     test_root: magento2/dev/tests/unit
   mediawiki:
@@ -305,6 +311,12 @@
     test_root: mediawiki-core/tests/phpunit
     test_file_regex: /.*(\Test.*\.php)$/
     config_file: mediawiki-core/tests/phpunit/suite.xml
+  jshrink:
+    url: https://github.com/tedivm/JShrink.git
+    branch: master
+    commit: 7a5cc44d6f4a2a52b65b72c801210eead092d16c
+    install_root: jshrink
+    test_root: jshrink
   mockery:
     url: https://github.com/padraic/mockery.git
     branch: "0.9.0"

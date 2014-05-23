@@ -33,10 +33,10 @@ static TransIDSet findPredTrans(const SrcRec* sr,
 
   for (auto& inBr : sr->incomingBranches()) {
     TransID srcId = folly::get_default(jmpToTransID, inBr.toSmash(),
-      InvalidID);
+      kInvalidTransID);
     FTRACE(5, "findPredTrans: toSmash = {}   srcId = {}\n",
            inBr.toSmash(), srcId);
-    if (srcId != InvalidID) {
+    if (srcId != kInvalidTransID) {
       predSet.insert(srcId);
     }
   }
@@ -104,8 +104,11 @@ TransCFG::TransCFG(FuncId funcId,
       if (hasNode(predId)) {
         auto predPostConds =
           profData->transRegion(predId)->blocks.back()->postConds();
-        if (preCondsAreSatisfied(dstBlock, predPostConds)) {
-          FTRACE(5, "TransCFG: adding arc {} -> {}\n", predId, dstId);
+        SrcKey predSK = profData->transSrcKey(predId);
+        if (preCondsAreSatisfied(dstBlock, predPostConds) &&
+            predSK.resumed() == dstSK.resumed()) {
+          FTRACE(5, "TransCFG: adding arc {} -> {} ({} -> {})\n",
+                 predId, dstId, showShort(predSK), showShort(dstSK));
           addArc(predId, dstId, TransCFG::Arc::kUnknownWeight);
         }
       }

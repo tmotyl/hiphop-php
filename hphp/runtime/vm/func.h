@@ -144,7 +144,7 @@ struct Func {
   ~Func();
   static void destroy(Func* func);
 
-  Func* clone(Class* cls) const;
+  Func* clone(Class* cls, const StringData* name = nullptr) const;
   Func* cloneAndSetClass(Class* cls) const;
 
   void validate() const {
@@ -196,6 +196,22 @@ struct Func {
   // making assumptions about where function calls will go.
   bool isNameBindingImmutable(const Unit* fromUnit) const;
 
+  /*
+   * Access to the maximum stack cells this function can use.  This is
+   * used for stack overflow checks.
+   *
+   * The maximum cells for a function includes all its locals, all
+   * cells for its iterators, all temporary eval stack slots, and all
+   * cells it pushes for ActRecs in FPI regions.  It does not include
+   * its own ActRec, because whoever called it must have(+) included
+   * the size of the ActRec in an FPI region for itself.  The reason
+   * it must still count its parameter locals is that the caller may
+   * or may not pass any of the parameters, regardless of how many are
+   * declared.
+   *
+   *   + Except in a re-entry situation.  That must be handled
+   *     specially in bytecode.cpp.
+   */
   void setMaxStackCells(int cells) { m_maxStackCells = cells; }
   int maxStackCells() const { return m_maxStackCells; }
 
@@ -220,7 +236,7 @@ struct Func {
 
   bool hasVariadicCaptureParam() const {
 #ifdef DEBUG
-    assert(((bool) (m_attrs & AttrVariadicParam)) ==
+    assert(bool(m_attrs & AttrVariadicParam) ==
            (numParams() && params()[numParams() - 1].isVariadic()));
 #endif
     return m_attrs & AttrVariadicParam;
@@ -280,10 +296,6 @@ struct Func {
   Unit* unit() const { return m_unit; }
   PreClass* preClass() const { return shared()->m_preClass; }
   Class* cls() const { return m_cls; }
-  void setName(const StringData* name) {
-    m_name = name;
-    setFullName();
-  }
   Class* baseCls() const { return m_baseCls; }
   void setBaseCls(Class* baseCls) { m_baseCls = baseCls; }
   bool hasPrivateAncestor() const { return m_hasPrivateAncestor; }
@@ -334,12 +346,16 @@ struct Func {
     return offsetof(SharedData, m_base);
   }
   char &maybeIntercepted() const { return m_maybeIntercepted; }
-  int numParams() const { return m_numParams; }
+  uint32_t numParams() const {
+    assert(bool(m_attrs & AttrVariadicParam) != bool(m_paramCounts & 1));
+    assert((m_paramCounts >> 1) == params().size());
+    return (m_paramCounts) >> 1;
+  }
 
-  int numNonVariadicParams() const {
-    assert(m_numNonVariadicParams ==
-           (hasVariadicCaptureParam() ? (m_numParams - 1) : (m_numParams)));
-    return m_numNonVariadicParams;
+  uint32_t numNonVariadicParams() const {
+    assert(bool(m_attrs & AttrVariadicParam) != bool(m_paramCounts & 1));
+    assert((m_paramCounts >> 1) == params().size());
+    return (m_paramCounts - 1) >> 1;
   }
   const ParamInfoVec& params() const { return shared()->m_params; }
   int numLocals() const { return shared()->m_numLocals; }
@@ -377,14 +393,18 @@ struct Func {
   const StringData* docComment() const { return shared()->m_docComment; }
   bool isClosureBody() const { return shared()->m_isClosureBody; }
   bool isClonedClosure() const;
+  bool isAsync() const { return shared()->m_isAsync; }
   bool isGenerator() const { return shared()->m_isGenerator; }
   bool isPairGenerator() const { return shared()->m_isPairGenerator; }
+  bool isAsyncFunction() const { return isAsync() && !isGenerator(); }
+  bool isAsyncGenerator() const { return isAsync() && isGenerator(); }
+  bool isNonAsyncGenerator() const { return !isAsync() && isGenerator(); }
+  bool isResumable() const { return isAsync() || isGenerator(); }
 
   /**
    * Was this generated specially by the compiler to aide the runtime?
    */
   bool isGenerated() const { return shared()->m_isGenerated; }
-  bool isAsync() const { return shared()->m_isAsync; }
   bool hasStaticLocals() const { return !shared()->m_staticVars.empty(); }
   int numStaticLocals() const { return shared()->m_staticVars.size(); }
   const ClassInfo::MethodInfo* methInfo() const { return shared()->m_info; }
@@ -433,9 +453,7 @@ struct Func {
   unsigned char* getPrologue(int index) const {
     return m_prologueTable[index];
   }
-  int numPrologues() const {
-    return getMaxNumPrologues(m_numParams);
-  }
+  int numPrologues() const;
   static int getMaxNumPrologues(int numParams) {
     // maximum number of prologues is numParams+2. The extra 2 are for
     // the case where the number of actual params equals numParams and
@@ -447,7 +465,7 @@ struct Func {
   void resetPrologues() {
     // Useful when killing code; forget what we've learned about the contents
     // of the translation cache.
-    initPrologues(m_numParams);
+    initPrologues(numParams());
   }
 
   const NamedEntity* getNamedEntity() const {
@@ -479,7 +497,7 @@ public: // Offset accessors for the translator.
   X(attrs);
   X(unit);
   X(cls);
-  X(numParams);
+  X(paramCounts);
   X(refBitVal);
   X(fullName);
   X(prologueTable);
@@ -540,11 +558,12 @@ private:
   static const int kMagic = 0xba5eba11;
 
 private:
-  void setFullName();
+  void setFullName(int numParams);
   void init(int numParams);
   void initPrologues(int numParams);
   void appendParam(bool ref, const ParamInfo& info,
                    std::vector<ParamInfo>& pBuilder);
+  void finishedEmittingParams(std::vector<ParamInfo>& pBuilder);
   void allocVarId(const StringData* name);
   const SharedData* shared() const { return m_shared.get(); }
   SharedData* shared() { return m_shared.get(); }
@@ -584,8 +603,10 @@ private:
   uint64_t m_refBitVal{0};
   Unit* m_unit;
   SharedDataPtr m_shared;
-  int m_numParams{0};
-  int m_numNonVariadicParams{0};
+  // Initialized by Func::finishedEmittingParams, the least significant bit
+  // is 1 if the last param is not variadic; the 31 most significant bits
+  // are the total number of params (including the variadic param)
+  uint32_t m_paramCounts{0};
   Attr m_attrs;
   // This must be the last field declared in this structure
   // and the Func class should not be inherited from.

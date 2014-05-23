@@ -20,7 +20,7 @@
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/debugger/debugger_proxy.h"
 #include "hphp/runtime/base/file-repository.h"
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP {
@@ -170,7 +170,9 @@ static void addBreakPointsInFile(Eval::DebuggerProxy* proxy,
 
 static void addBreakPointFuncEntry(const Func* f) {
   // we are in a generator, skip CreateCont / RetC / PopC opcodes
-  auto base = f->isGenerator() ? c_Continuation::userBase(f) : f->base();
+  auto base = f->isGenerator()
+    ? (f->isAsync() ? bad_value<Offset>() : c_Generator::userBase(f))
+    : f->base();
   auto pc = f->unit()->at(base);
 
   TRACE(5, "func() break %s : unit %p offset %d ==> pc %p)\n",
@@ -216,7 +218,6 @@ static void addBreakPointsClass(Eval::DebuggerProxy* proxy, const Class* cls) {
   size_t numFuncs = cls->numMethods();
   if (numFuncs == 0) return;
   auto clsName = cls->name();
-  auto funcs = cls->methods();
   std::vector<Eval::BreakPointInfoPtr> bps;
   proxy->getBreakPoints(bps);
   for (unsigned int i = 0; i < bps.size(); i++) {
@@ -226,7 +227,7 @@ static void addBreakPointsClass(Eval::DebuggerProxy* proxy, const Class* cls) {
     if (bp->getClass() != clsName->data()) continue;
     bp->m_bindState = Eval::BreakPointInfo::KnownToBeInvalid;
     for (size_t i = 0; i < numFuncs; ++i) {
-      auto f = funcs[i];
+      auto f = cls->getMethod(i);
       if (!matchFunctionName(bp->getFunction(), f)) continue;
       bp->m_bindState = Eval::BreakPointInfo::KnownToBeValid;
       addBreakPointFuncEntry(f);
@@ -311,9 +312,8 @@ void phpSetBreakPoints(Eval::DebuggerProxy* proxy) {
       size_t numFuncs = cls->numMethods();
       if (numFuncs == 0) continue;
       auto methodName = bp->getFunction();
-      Func* const* funcs = cls->methods();
       for (size_t i = 0; i < numFuncs; ++i) {
-        auto f = funcs[i];
+        auto f = cls->getMethod(i);
         if (!matchFunctionName(methodName, f)) continue;
         bp->m_bindState = Eval::BreakPointInfo::KnownToBeValid;
         addBreakPointFuncEntry(f);

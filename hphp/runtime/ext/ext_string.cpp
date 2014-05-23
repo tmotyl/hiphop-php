@@ -736,33 +736,29 @@ String f_str_repeat(const String& input, int multiplier) {
 ///////////////////////////////////////////////////////////////////////////////
 
 Variant f_printf(int _argc, const String& format, const Array& _argv /* = null_array */) {
-  int len = 0; char *output = string_printf(format.data(), format.size(),
-                                            _argv, &len);
-  if (output == NULL) return false;
-  echo(output, len); free(output);
-  return len;
+  String output = string_printf(format.data(), format.size(), _argv);
+  if (output.isNull()) return false;
+  echo(output.data(), output.size());
+  return output.size();
 }
 
 Variant f_vprintf(const String& format, const Array& args) {
-  int len = 0; char *output = string_printf(format.data(), format.size(),
-                                            args, &len);
-  if (output == NULL) return false;
-  echo(output, len); free(output);
-  return len;
+  String output = string_printf(format.data(), format.size(), args);
+  if (output.isNull()) return false;
+  echo(output.data(), output.size());
+  return output.size();
 }
 
 Variant f_sprintf(int _argc, const String& format, const Array& _argv /* = null_array */) {
-  int len = 0;
-  char *output = string_printf(format.data(), format.size(), _argv, &len);
-  if (output == NULL) return false;
-  return String(output, len, AttachString);
+  String output = string_printf(format.data(), format.size(), _argv);
+  if (output.isNull()) return false;
+  return output;
 }
 
 Variant f_vsprintf(const String& format, const Array& args) {
-  int len = 0;
-  char *output = string_printf(format.data(), format.size(), args, &len);
-  if (output == NULL) return false;
-  return String(output, len, AttachString);
+  String output = string_printf(format.data(), format.size(), args);
+  if (output.isNull()) return false;
+  return output;
 }
 
 Variant f_sscanf(int _argc,
@@ -802,29 +798,19 @@ Variant f_money_format(const String& format, double number) {
 }
 
 String f_number_format(double number, int decimals /* = 0 */,
-                       const Variant& dec_point /* = "." */,
-                       const Variant& thousands_sep /* = "," */) {
-  char ch_dec_point = '.';
-  if (!dec_point.isNull()) {
-    const String& s = dec_point.toString();
-    if (s.size() >= 1) {
-      ch_dec_point = s[0];
-    } else {
-      ch_dec_point = 0;
-    }
+                       const Variant& dec_point_in /* = "." */,
+                       const Variant& thousands_sep_in /* = "," */) {
+
+  String dec_point(".");
+  if (!dec_point_in.isNull()) {
+    dec_point = dec_point_in.toString();
   }
-  char ch_thousands_sep = ',';
-  if (!thousands_sep.isNull()) {
-    const String& s = thousands_sep.toString();
-    if (s.size() >= 1) {
-      ch_thousands_sep = s[0];
-    } else {
-      ch_thousands_sep = 0;
-    }
+  String thousands_sep(",");
+  if (!thousands_sep_in.isNull()) {
+    thousands_sep = thousands_sep_in.toString();
   }
-  char *ret = string_number_format(number, decimals, ch_dec_point,
-                                   ch_thousands_sep);
-  return String(ret, AttachString);
+
+  return string_number_format(number, decimals, dec_point, thousands_sep);
 }
 
 int64_t f_strcmp(const String& str1, const String& str2) {
@@ -1327,15 +1313,11 @@ int64_t f_similar_text(const String& first, const String& second,
 
 Variant f_soundex(const String& str) {
   if (str.empty()) return false;
-  return String(string_soundex(str.c_str()), AttachString);
+  return string_soundex(str);
 }
 
 Variant f_metaphone(const String& str, int phones /* = 0 */) {
-  char *ret = string_metaphone(str.data(), str.size(), 0, 1);
-  if (ret) {
-    return String(ret, AttachString);
-  }
-  return false;
+  return string_metaphone(str.data(), str.size(), 0, 1);
 }
 
 String f_html_entity_decode(const String& str, int flags /* = k_ENT_COMPAT */,
@@ -1485,7 +1467,7 @@ void f_parse_str(const String& str, VRefParam arr /* = null */) {
   Array result = Array::Create();
   HttpProtocol::DecodeParameters(result, str.data(), str.size());
   if (!arr.isReferenced()) {
-    HHVM_FN(extract)(result);
+    HHVM_FN(__SystemLib_extract)(result);
     return;
   }
   arr = result;
@@ -1598,11 +1580,7 @@ String f_nl_langinfo(int item) {
 }
 
 String f_convert_cyr_string(const String& str, const String& from, const String& to) {
-  char ch_from = from[0];
-  char ch_to = to[0];
-  char *ret = string_convert_cyrillic_string(str.data(), str.size(),
-                                             ch_from, ch_to);
-  return String(ret, str.size(), AttachString);
+  return string_convert_cyrillic_string(str, from[0], to[0]);
 }
 
 

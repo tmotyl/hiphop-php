@@ -37,17 +37,11 @@ String f_create_function(const String& args, const String& code);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-/**
- * PHP's func_get_arg() is transformed to this function with some extra
- * parameters to help the implementation.
- */
 Variant f_func_get_arg(int arg_num);
+Variant f_func_get_arg_sl(int arg_num); // __SystemLib\\func_get_arg_sl
 
-/**
- * PHP's func_get_args() is transformed to this function with some extra
- * parameters to help the implementation.
- */
 Variant f_func_get_args();
+Variant f_func_get_args_sl(); // __SystemLib\\func_get_args_sl
 Array hhvm_get_frame_args(const ActRec* ar, int offset);
 
 /**
@@ -56,18 +50,14 @@ Array hhvm_get_frame_args(const ActRec* ar, int offset);
  */
 Variant f_func_slice_args(int offset);
 
-/**
- * HPHP actually inlines this function, so this is degenerated.
- */
 int64_t f_func_num_args();
+int64_t f_func_num_arg_(); // __SystemLib\\func_num_arg_
 
 ///////////////////////////////////////////////////////////////////////////////
 
 void f_register_postsend_function(
   int _argc, const Variant& function, const Array& _argv = null_array);
 void f_register_shutdown_function(
-  int _argc, const Variant& function, const Array& _argv = null_array);
-void f_register_cleanup_function(
   int _argc, const Variant& function, const Array& _argv = null_array);
 
 ///////////////////////////////////////////////////////////////////////////////

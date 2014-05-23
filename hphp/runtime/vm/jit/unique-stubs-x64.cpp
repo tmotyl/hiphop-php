@@ -60,11 +60,11 @@ TCA emitRetFromInterpretedGeneratorFrame() {
   moveToAlign(mcg->code.stubs());
   auto const ret = a.frontier();
 
-  // We have to get the Continuation object from the current AR's $this, then
+  // We have to get the Generator object from the current AR's $this, then
   // find where its embedded AR is.
   PhysReg rContAR = serviceReqArgRegs[0];
   a.    loadq  (rVmFp[AROFF(m_this)], rContAR);
-  a.    lea  (rContAR[c_Continuation::arOff()], rContAR);
+  a.    lea  (rContAR[c_Generator::arOff()], rContAR);
   a.    movq   (rVmFp, serviceReqArgRegs[1]);
   emitServiceReq(mcg->code.stubs(), SRFlags::JmpInsteadOfRet,
                  REQ_POST_INTERP_RET);
@@ -248,7 +248,9 @@ void emitFuncPrologueRedispatch(UniqueStubs& uniqueStubs) {
   a.    loadq  (rStashedAR[AROFF(m_func)], rax);
   a.    loadl  (rStashedAR[AROFF(m_numArgsAndFlags)], edx);
   a.    andl   (0x1fffffff, edx);
-  a.    loadl  (rax[Func::numParamsOff()], ecx);
+  a.    loadl  (rax[Func::paramCountsOff()], ecx);
+  // see Func::finishedEmittingParams and Func::numParams for rationale
+  a.    shrl   (0x1, ecx);
 
   // If we passed more args than declared, jump to the numParamsCheck.
   a.    cmpl   (edx, ecx);
@@ -371,7 +373,7 @@ void emitFCallHelperThunk(UniqueStubs& uniqueStubs) {
   a.    movq   (rVmSp, argNumToRegName[1]);
   a.    cmpq   (rStashedAR, rVmFp);
   a.    jne8   (popAndXchg);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.    jmp    (rax);
   // The ud2 is a hint to the processor that the fall-through path of the
   // indirect jump (which it statically predicts as most likely) is not
@@ -391,7 +393,7 @@ asm_label(a, popAndXchg);
   // frames, however, so switch it into rbp in case fcallHelper throws.
   a.    pop    (rStashedAR[AROFF(m_savedRip)]);
   a.    xchgq  (rStashedAR, rVmFp);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.    testq  (rax, rax);
   a.    js8    (skip);
   a.    xchgq  (rStashedAR, rVmFp);
@@ -422,7 +424,7 @@ void emitFuncBodyHelperThunk(UniqueStubs& uniqueStubs) {
   // fcallArrayHelper). So the stack parity is already correct.
   a.    movq   (rVmFp, argNumToRegName[0]);
   a.    movq   (rVmSp, argNumToRegName[1]);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.    jmp    (rax);
   a.    ud2    ();
 
@@ -445,7 +447,7 @@ void emitFunctionEnterHelper(UniqueStubs& uniqueStubs) {
   a.   push    (ar[AROFF(m_savedRip)]);
   a.   push    (ar[AROFF(m_sfp)]);
   a.   movq    (EventHook::NormalFunc, argNumToRegName[1]);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.   testb   (al, al);
   a.   je8     (skip);
   a.   addq    (16, rsp);
@@ -495,4 +497,3 @@ UniqueStubs emitUniqueStubs() {
 //////////////////////////////////////////////////////////////////////
 
 }}}
-

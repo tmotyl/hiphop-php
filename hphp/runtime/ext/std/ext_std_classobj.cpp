@@ -99,11 +99,10 @@ static void getMethodNamesImpl(const Class* cls,
   // The order of these methods is so that the first ones win on
   // case insensitive name conflicts.
 
-  auto const methods = cls->methods();
   auto const numMethods = cls->numMethods();
 
   for (Slot i = 0; i < numMethods; ++i) {
-    auto const meth = methods[i];
+    auto const meth = cls->getMethod(i);
     auto const declCls = meth->cls();
     auto addMeth = [&]() {
       auto const methName = Variant(meth->name(), Variant::StaticStrInit{});
@@ -186,7 +185,7 @@ Array HHVM_FUNCTION(get_class_constants, const String& className) {
         value = cls->clsCnsGet(consts[i].m_name);
       }
       assert(value.m_type != KindOfUninit);
-      arrayInit.set(name, cellAsCVarRef(value), true /* isKey */);
+      arrayInit.set(name, cellAsCVarRef(value));
     }
   }
 
@@ -226,7 +225,7 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
     assert(name->size() != 0);
     if (Class::IsPropAccessible(propInfo[i], ctx)) {
       const TypedValue* value = &((*propVals)[i]);
-      arr.set(name, tvAsCVarRef(value), true /* isKey */);
+      arr.set(name, tvAsCVarRef(value));
     }
   }
 
@@ -235,7 +234,7 @@ Variant HHVM_FUNCTION(get_class_vars, const String& className) {
     TypedValue* value = cls->getSProp(ctx, sPropInfo[i].m_name, vis, access);
     if (access) {
       arr.set(const_cast<StringData*>(sPropInfo[i].m_name.get()),
-        tvAsCVarRef(value), true /* isKey */);
+        tvAsCVarRef(value));
     }
   }
 
@@ -299,7 +298,7 @@ Variant HHVM_FUNCTION(get_parent_class,
     return false;
   }
 
-  const Class* cls = Unit::lookupClass(class_name.toString().get());
+  const Class* cls = Unit::loadClass(class_name.toString().get());
   if (cls) {
     auto parentClass = cls->parentStr();
     if (!parentClass.empty()) {

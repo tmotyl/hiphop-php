@@ -61,8 +61,8 @@ bool mayUseConst(const IRInstruction& inst, unsigned i) {
     break;
   case SpillFrame:
     if (i == 1) return true; // func
-    if (i == 2 && type <= Type::Cls) return true; // objOrCls is Cls
-    if (i == 2 && type <= Type::InitNull) return true; // objOrCls is null
+    if (i == 2 && type <= Type::Cls) return true;     // objOrCls is Cls
+    if (i == 2 && type <= Type::Nullptr) return true; // objOrCls is null
     break;
   case StRetVal:
     if (i == 1) return okStore(cint); // value->cgStore
@@ -88,13 +88,8 @@ bool mayUseConst(const IRInstruction& inst, unsigned i) {
   case StRef:
     if (i == 1) return okStore(cint);
     break;
-  case Call:
-    if (i == 3) return true; // func
-    if (i >= 4) return okStore(cint);
-    break;
   case CallBuiltin:
-    if (i >= 2) return true; // args -> ArgGroup.ssa()
-    break;
+    return true;
   case StLoc:
   case StLocNT:
     if (i == 1) return okStore(cint); // value
@@ -234,7 +229,6 @@ bool loadsCell(Opcode op) {
     case LdElem:
     case LdPackedArrayElem:
     case LdRef:
-    case LdThis:
     case LdStaticLocCached:
     case LookupCns:
     case LookupClsCns:
@@ -271,6 +265,7 @@ bool storesCell(const IRInstruction& inst, uint32_t srcIdx) {
     case StRetVal:
     case StLoc:
     case StLocNT:
+    case StCell:
       return srcIdx == 1;
 
     case StProp:
@@ -284,11 +279,8 @@ bool storesCell(const IRInstruction& inst, uint32_t srcIdx) {
     case SpillStack:
       return srcIdx >= 2 && srcIdx < inst.numSrcs();
 
-    case Call:
-      return srcIdx >= 4 && srcIdx < inst.numSrcs();
-
     case CallBuiltin:
-      return srcIdx >= 1 && srcIdx < inst.numSrcs();
+      return srcIdx < inst.numSrcs();
 
     default:
       return false;
@@ -337,7 +329,6 @@ bool needsUnusedReg(const IRInstruction& inst, unsigned dst) {
 
   // These are optional branches, so DCE may not remove them, and use
   // cgLoad, which checks for InvalidReg
-  case LdThis:
   case LdRef:
   case LdMem:
      break;

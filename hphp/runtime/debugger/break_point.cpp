@@ -27,7 +27,7 @@
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/base/comparisons.h"
-#include "hphp/runtime/ext/ext_continuation.h"
+#include "hphp/runtime/ext/ext_generator.h"
 
 namespace HPHP { namespace Eval {
 
@@ -106,7 +106,9 @@ InterruptSite::InterruptSite(bool hardBreakPoint, const Variant& error)
     m_unit = f->unit();
     bail_on(!m_unit);
     m_offset = m_unit->offsetOf(pc);
-    auto base = f->isGenerator() ? c_Continuation::userBase(f) : f->base();
+    auto base = f->isGenerator()
+      ? (f->isAsync() ? bad_value<Offset>() : c_Generator::userBase(f))
+      : f->base();
     if (m_offset == base) {
       m_funcEntry = true;
     }

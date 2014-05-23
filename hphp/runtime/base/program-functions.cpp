@@ -43,7 +43,7 @@
 #include "hphp/util/repo-schema.h"
 #include "hphp/util/current-executable.h"
 #include "hphp/util/service-data.h"
-#include "hphp/util/file-util.h"
+#include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/stat-cache.h"
 #include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/ext_fb.h"
@@ -61,6 +61,7 @@
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/system/constants.h"
+#include "hphp/runtime/base/config.h"
 
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/positional_options.hpp>
@@ -1213,11 +1214,12 @@ static int execute_program_impl(int argc, char** argv) {
   // we need to initialize pcre cache table very early
   pcre_init();
 
+  IniSetting::Map ini = IniSetting::Map::object;
   Hdf config;
   for (auto& c : po.config) {
-    config.append(c);
+    Config::Parse(c, ini, config);
   }
-  RuntimeOption::Load(config, &po.confStrings);
+  RuntimeOption::Load(ini, config, &po.confStrings);
   for (auto& c : po.config) {
     process_ini_settings(c);
   }
@@ -1457,7 +1459,7 @@ static int execute_program_impl(int argc, char** argv) {
 }
 
 String canonicalize_path(const String& p, const char* root, int rootLen) {
-  String path(FileUtil::canonicalize(p.c_str(), p.size()), AttachString);
+  String path = FileUtil::canonicalize(p);
   if (path.charAt(0) == '/') {
     const string &sourceRoot = RuntimeOption::SourceRoot;
     int len = sourceRoot.size();
@@ -1543,7 +1545,8 @@ void hphp_process_init() {
   action.sa_sigaction = on_timeout;
   action.sa_flags = SA_SIGINFO | SA_NODEFER;
   sigaction(SIGVTALRM, &action, nullptr);
-  Xenon::getInstance().start(RuntimeOption::XenonPeriodSeconds);
+  // start takes milliseconds, Period is a double in seconds
+  Xenon::getInstance().start(1000 * RuntimeOption::XenonPeriodSeconds);
 
   init_thread_locals();
 

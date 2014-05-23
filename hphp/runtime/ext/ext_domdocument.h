@@ -245,13 +245,13 @@ class c_DOMCharacterData : public c_DOMNode {
 // class DOMComment
 
 FORWARD_DECLARE_CLASS(DOMComment);
-class c_DOMComment : public c_DOMCharacterData {
+class c_DOMComment : public c_DOMNode {
  public:
   DECLARE_CLASS_NO_SWEEP(DOMComment)
 
   // need to implement
   c_DOMComment(Class* cls = c_DOMComment::classof())
-    : c_DOMCharacterData(cls)
+    : c_DOMNode(cls)
   {}
   ~c_DOMComment() {}
   public: void t___construct(const String& value = null_string);
@@ -590,16 +590,16 @@ class c_DOMNodeIterator : public ExtObjectData, public Sweepable {
   public: Variant t_rewind();
   public: Variant t_valid();
 
-
-
 public:
   void reset_iterator();
   void set_iterator(ObjectData* o, dom_iterable *objmap);
+  void setKeyIsNamed() { m_keyIsNamed = true; }
 
   Object m_o;
   dom_iterable *m_objmap;
   ArrayIter m_iter;
   int m_index;
+  bool m_keyIsNamed = false;
   Object m_curobj;
 };
 

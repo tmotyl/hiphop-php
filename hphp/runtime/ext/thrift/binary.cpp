@@ -32,6 +32,7 @@ namespace HPHP {
 
 StaticString PHPTransport::s_getTransport("getTransport");
 StaticString PHPTransport::s_flush("flush");
+StaticString PHPTransport::s_onewayFlush("onewayFlush");
 StaticString PHPTransport::s_write("write");
 StaticString PHPTransport::s_putBack("putBack");
 StaticString PHPTransport::s_read("read");
@@ -53,8 +54,8 @@ IMPLEMENT_DEFAULT_EXTENSION_VERSION(thrift_protocol, NO_EXTENSION_VERSION_YET);
 
 const int32_t VERSION_MASK = 0xffff0000;
 const int32_t VERSION_1 = 0x80010000;
-const int8_t T_CALL = 1;
-const int8_t T_REPLY = 2;
+const int8_t T_CALL UNUSED = 1;
+const int8_t T_REPLY UNUSED = 2;
 const int8_t T_EXCEPTION = 3;
 // tprotocolexception
 const int INVALID_DATA = 1;
@@ -267,7 +268,7 @@ Variant binary_deserialize(int8_t thrift_typeID, PHPInputTransport& transport,
           if (key.isInteger()) {
             init.set(key, true);
           } else {
-            init.set(key.toString(), true);
+            init.setKeyUnconverted(key, true);
           }
         }
         ret = init.toArray();
@@ -536,7 +537,7 @@ void binary_serialize_spec(const Object& zthis, PHPOutputTransport& transport,
 
 void f_thrift_protocol_write_binary(const Object& transportobj, const String& method_name,
                                     int64_t msgtype, const Object& request_struct,
-                                    int seqid, bool strict_write) {
+                                    int seqid, bool strict_write, bool oneway) {
 
   PHPOutputTransport transport(transportobj);
 
@@ -557,7 +558,11 @@ void f_thrift_protocol_write_binary(const Object& transportobj, const String& me
                                             false);
   binary_serialize_spec(request_struct, transport, spec.toArray());
 
-  transport.flush();
+  if (oneway) {
+    transport.onewayFlush();
+  } else {
+    transport.flush();
+  }
 }
 
 Variant f_thrift_protocol_read_binary(const Object& transportobj,

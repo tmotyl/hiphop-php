@@ -2,6 +2,10 @@
 #include "hphp/parser/scanner.h"
 #include <cassert>
 
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wnull-conversion"
+#endif
+
 // macros for flex
 #define YYSTYPE HPHP::ScannerToken
 #define YYLTYPE HPHP::Location
@@ -424,6 +428,8 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
 <ST_IN_SCRIPTING>"-="                 { RETSTEP(T_MINUS_EQUAL);}
 <ST_IN_SCRIPTING>"*="                 { RETSTEP(T_MUL_EQUAL);}
 <ST_IN_SCRIPTING>"/="                 { RETSTEP(T_DIV_EQUAL);}
+<ST_IN_SCRIPTING>"**"                 { RETSTEP(T_POW);}
+<ST_IN_SCRIPTING>"**="                { RETSTEP(T_POW_EQUAL);}
 <ST_IN_SCRIPTING>".="                 { RETSTEP(T_CONCAT_EQUAL);}
 <ST_IN_SCRIPTING>"%="                 { RETSTEP(T_MOD_EQUAL);}
 <ST_IN_SCRIPTING>"<<="                { RETSTEP(T_SL_EQUAL);}
@@ -463,7 +469,7 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
 }
 
 <ST_IN_SCRIPTING>"tuple"/("("|{WHITESPACE_AND_COMMENTS}"(") {
-  HH_ONLY_KEYWORD(T_TUPLE);
+  HH_ONLY_KEYWORD(T_ARRAY);
 }
 
 <ST_IN_SCRIPTING>"?"/":"[a-zA-Z_\x7f-\xff] {

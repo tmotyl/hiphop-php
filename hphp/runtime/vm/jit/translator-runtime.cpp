@@ -382,7 +382,7 @@ RefData* closureStaticLocInit(StringData* name, ActRec* fp, TypedValue val) {
 }
 
 ALWAYS_INLINE
-static int64_t ak_exist_string_impl(ArrayData* arr, StringData* key) {
+static bool ak_exist_string_impl(ArrayData* arr, StringData* key) {
   int64_t n;
   if (key->isStrictlyInteger(n)) {
     return arr->exists(n);
@@ -390,31 +390,24 @@ static int64_t ak_exist_string_impl(ArrayData* arr, StringData* key) {
   return arr->exists(key);
 }
 
-int64_t ak_exist_string(ArrayData* arr, StringData* key) {
+bool ak_exist_string(ArrayData* arr, StringData* key) {
   return ak_exist_string_impl(arr, key);
 }
 
-int64_t ak_exist_int(ArrayData* arr, int64_t key) {
-  bool res = arr->exists(key);
-  return res;
-}
-
-int64_t ak_exist_string_obj(ObjectData* obj, StringData* key) {
+bool ak_exist_string_obj(ObjectData* obj, StringData* key) {
   if (obj->isCollection()) {
     return collectionContains(obj, key);
   }
   const Array& arr = obj->o_toArray();
-  int64_t res = ak_exist_string_impl(arr.get(), key);
-  return res;
+  return ak_exist_string_impl(arr.get(), key);
 }
 
-int64_t ak_exist_int_obj(ObjectData* obj, int64_t key) {
+bool ak_exist_int_obj(ObjectData* obj, int64_t key) {
   if (obj->isCollection()) {
     return collectionContains(obj, key);
   }
   const Array& arr = obj->o_toArray();
-  bool res = arr.get()->exists(key);
-  return res;
+  return arr.get()->exists(key);
 }
 
 ALWAYS_INLINE
@@ -864,6 +857,21 @@ const Func* lookupUnknownFunc(const StringData* name) {
   return func;
 }
 
+const Func* lookupFallbackFunc(const StringData* name,
+                               const StringData* fallback) {
+  JIT::VMRegAnchor _;
+  // Try to load the first function
+  auto func = Unit::loadFunc(name);
+  if (LIKELY(!func)) {
+    // Then try to load the fallback function
+    func = Unit::loadFunc(fallback);
+    if (UNLIKELY(!func)) {
+        raise_error("Call to undefined function %s()", name->data());
+    }
+  }
+  return func;
+}
+
 Class* lookupKnownClass(Class** cache, const StringData* clsName) {
   Class* cls = *cache;
   assert(!cls); // the caller should already have checked
@@ -881,7 +889,6 @@ Cell lookupClassConstantTv(TypedValue* cache,
                            const StringData* cls,
                            const StringData* cns) {
   Cell clsCns = g_context->lookupClsCns(ne, cls, cns);
-  assert(isUncounted(clsCns));
   cellDup(clsCns, *cache);
   return clsCns;
 }

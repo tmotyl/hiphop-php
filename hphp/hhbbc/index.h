@@ -28,6 +28,7 @@
 
 #include "hphp/util/either.h"
 #include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/vm/type-constraint.h"
 
 #include "hphp/hhbbc/hhbbc.h"
@@ -39,12 +40,14 @@ namespace HPHP { namespace HHBBC {
 
 struct Type;
 struct Index;
+enum class ClsTag : uint8_t;
 
 namespace php {
 struct Class;
 struct Func;
 struct Unit;
 struct Program;
+struct Const;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -137,8 +140,9 @@ struct Class {
    * Returns true if this class could be a subtype of `o' at runtime.
    * When true is returned the two classes may still be unrelated but it is
    * not possible to tell. A typical example is with "non unique" classes.
+   * 'tag' and 'otherTag' specify the precision of type of the class.
    */
-  bool couldBe(const Class& o) const;
+  bool couldBe(const Class& o, ClsTag tag, ClsTag otherTag) const;
 
   /*
    * Returns the name of this class.  Non-null guarantee.
@@ -155,19 +159,26 @@ struct Class {
   bool couldBeOverriden() const;
 
   /*
+   * Returns true if this class could be an interface.
+   */
+  bool couldBeInterface() const;
+
+  /*
    * Returns the Class that is the first common ancestor between 'this' and 'o'.
    * If there is no common ancestor folly::none is returned
    */
   folly::Optional<Class> commonAncestor(const Class& o) const;
 
 private:
-  Class(borrowed_ptr<const Index>, Either<SString,borrowed_ptr<ClassInfo>>);
+  Class(Either<SString, borrowed_ptr<ClassInfo>>);
+  Class(Either<SString, borrowed_ptr<ClassInfo>>,
+        std::set<borrowed_ptr<ClassInfo>>&& ifaces);
 
 private:
   friend std::string show(const Class&);
   friend struct ::HPHP::HHBBC::Index;
-  borrowed_ptr<const Index> index;
   Either<SString,borrowed_ptr<ClassInfo>> val;
+  std::shared_ptr<std::set<borrowed_ptr<ClassInfo>>> ifaces;
 };
 
 /*
@@ -195,6 +206,13 @@ struct Func {
    */
   SString name() const;
 
+  /*
+   * Returns interface class associated with this function, if any.
+   * This field is present only when the function is resolved through
+   * an interface.
+   */
+  folly::Optional<res::Class> interfaceCls() const { return rcls; }
+
 private:
   friend struct ::HPHP::HHBBC::Index;
   using Rep = boost::variant< SString
@@ -204,11 +222,13 @@ private:
 
 private:
   Func(borrowed_ptr<const Index>, Rep);
+  Func(borrowed_ptr<const Index>, Rep, res::Class);
   friend std::string show(const Func&);
 
 private:
   borrowed_ptr<const Index> index;
   Rep val;
+  folly::Optional<res::Class> rcls;
 };
 
 /*
@@ -247,6 +267,15 @@ struct Index {
   ~Index();
 
   /*
+   * The Index contains a Builder for an ArrayTypeTable.
+   *
+   * If we're creating assert types with options.InsertAssertions, we
+   * need to keep track of which array types exist in the whole
+   * program in order to include it in the repo.
+   */
+  std::unique_ptr<ArrayTypeTable::Builder>& array_table_builder() const;
+
+  /*
    * Find all the closures created inside the context of a given
    * php::Class.
    */
@@ -273,8 +302,14 @@ struct Index {
    * closure.  This function should only be used with class names are
    * guaranteed to be closures (for example, the name supplied to a
    * CreateCl opcode).
+   *
+   * TODO(#3363851): logically this function should never fail to
+   * resolve, but there's a bug somewhere upstream where a closure
+   * class appears more than once but still has AttrUnique.  For now
+   * we handle this case by just returning a vector of all the
+   * possible closures.
    */
-  std::pair<res::Class,borrowed_ptr<php::Class>>
+  std::pair<res::Class,std::vector<borrowed_ptr<php::Class>>>
     resolve_closure_class(Context ctx, SString name) const;
 
   /*
@@ -455,6 +490,10 @@ private:
 private:
   template<class FuncRange>
   res::Func resolve_func_helper(const FuncRange&, SString) const;
+
+  folly::Optional<res::Func> resolve_iface_method(Context,
+                                                  res::Class cls,
+                                                  SString name) const;
   res::Func do_resolve(borrowed_ptr<const php::Func>) const;
   bool must_be_derived_from(borrowed_ptr<const php::Class>,
                             borrowed_ptr<const php::Class>) const;

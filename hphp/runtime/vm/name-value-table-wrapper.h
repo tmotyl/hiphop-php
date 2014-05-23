@@ -68,10 +68,9 @@ struct NameValueTableWrapper : private ArrayData {
 
 public:
   static void Release(ArrayData*) {}
-  static constexpr auto Copy =
-    reinterpret_cast<ArrayData* (*)(const ArrayData*)>(
-      ArrayCommon::ReturnFirstArg
-    );
+  static ArrayData* Copy(const ArrayData* ad) {
+    return const_cast<ArrayData*>(ad);
+  }
   static size_t Vsize(const ArrayData*);
   static void NvGetKey(const ArrayData* ad, TypedValue* out, ssize_t pos);
   static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
@@ -87,9 +86,8 @@ public:
                             bool copy);
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
 
-  static ArrayData* SetInt(ArrayData*, int64_t k, const Variant& v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, const Variant& v,
-                           bool copy);
+  static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
+  static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
   static ArrayData* SetRefInt(ArrayData*, int64_t k, Variant& v, bool copy);
   static ArrayData* SetRefStr(ArrayData*, StringData* k, Variant& v,
                               bool copy);
@@ -129,10 +127,9 @@ public:
   static bool Usort(ArrayData*, const Variant& cmp_function);
   static bool Uasort(ArrayData*, const Variant& cmp_function);
 
-  static constexpr auto Escalate =
-    reinterpret_cast<ArrayData* (*)(const ArrayData*)>(
-      ArrayCommon::ReturnFirstArg
-    );
+  static ArrayData* Escalate(const ArrayData* ad) {
+    return const_cast<ArrayData*>(ad);
+  }
 
 private:
   static NameValueTableWrapper* asNVTW(ArrayData* ad);

@@ -50,6 +50,8 @@ public:
     QS(FBUtf8, 32768)     \
     /* Order of the fields matters here if we're
      * matching on what flags are set */  \
+    QS(Xhtml, 32) /* k_ENT_XHTML */ \
+    QS(Xml1, 16)  /* k_ENT_XML1 */ \
     QS(Substitute, 8) /* k_ENT_SUBSTITUTE: replace invalid chars with FFFD */ \
     QS(Ignore, 4) /* k_ENT_IGNORE:   silently discard invalid chars */ \
     QS(Both, 3)   /* k_ENT_QUOTES:   escape both double and single quotes */  \
@@ -148,6 +150,7 @@ public:
   static int64_t CRC32(const String& input);
   static String Crypt(const String& input, const char *salt = "");
   static String MD5(const String& input, bool raw = false);
+  static String MD5(const char *data, uint32_t size, bool raw = false);
   static String SHA1(const String& input, bool raw = false);
 };
 

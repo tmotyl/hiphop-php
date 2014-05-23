@@ -625,6 +625,10 @@ static void CopyPathInfo(Array& server,
     // fix it so it is settable, so I'll leave this for now
     documentRoot = vhost->getDocumentRoot();
   }
+  if (documentRoot != s_forwardslash &&
+      documentRoot[documentRoot.length() - 1] == '/') {
+    documentRoot = documentRoot.substr(0, documentRoot.length() - 1);
+  }
   server.set(s_DOCUMENT_ROOT, documentRoot);
   server.set(s_SCRIPT_FILENAME, r.absolutePath());
 
@@ -642,7 +646,7 @@ static void CopyPathInfo(Array& server,
       } else {
         server.set(s_PATH_TRANSLATED,
                    String(server[s_DOCUMENT_ROOT].toCStrRef() +
-                          pathTranslated));
+                          s_forwardslash + pathTranslated));
       }
     } else {
       server.set(s_PATH_TRANSLATED,
@@ -689,9 +693,10 @@ void HttpProtocol::PrepareServerVariable(Array& server,
   HeaderMap headers;
   transport->getHeaders(headers);
   // Do this first so other methods can overwrite them
-  CopyTransportParams(server, transport);
   CopyHeaderVariables(server, headers);
   CopyServerInfo(server, transport, vhost);
+  // Do this last so it can overwrite all the previous settings
+  CopyTransportParams(server, transport);
   CopyRemoteInfo(server, transport);
   CopyAuthInfo(server, transport);
   CopyPathInfo(server, transport, r, vhost);
@@ -754,25 +759,20 @@ void HttpProtocol::DecodeParameters(Array& variables, const char *data,
   last_value:
     if ((val = (const char *)memchr(s, '=', (p - s)))) {
       int len = val - s;
-      char *name = url_decode(s, len);
-      String sname(name, len, AttachString);
+      String sname = url_decode(s, len);
 
       val++;
       len = p - val;
-      char *value = url_decode(val, len);
+      String value = url_decode(val, len);
       if (RuntimeOption::EnableMagicQuotesGpc) {
-        char *slashedvalue = string_addslashes(value, len);
-        free(value);
-        value = slashedvalue;
+        value = string_addslashes(value.data(), len);
       }
-      String svalue(value, len, AttachString);
 
-      register_variable(variables, (char*)sname.data(), svalue);
+      register_variable(variables, (char*)sname.data(), value);
     } else if (!post) {
       int len = p - s;
-      char *name = url_decode(s, len);
-      String sname(name, len, AttachString);
-      register_variable(variables, (char*)sname.data(), "");
+      String sname = url_decode(s, len);
+      register_variable(variables, (char*)sname.data(), empty_string);
     }
     s = p + 1;
   }
@@ -799,26 +799,21 @@ void HttpProtocol::DecodeCookies(Array& variables, char *data) {
     if (var != val && *var != '\0') {
       if (val) { /* have a value */
         int len = val - var;
-        char *name = url_decode(var, len);
-        String sname(name, len, AttachString);
+        String sname = url_decode(var, len);
 
         ++val;
         len = strlen(val);
-        char *value = url_decode(val, len);
+        String value = url_decode(val, len);
         if (RuntimeOption::EnableMagicQuotesGpc) {
-          char *slashedvalue = string_addslashes(value, len);
-          free(value);
-          value = slashedvalue;
+          value = string_addslashes(value.data(), len);
         }
-        String svalue(value, len, AttachString);
 
-        register_variable(variables, (char*)sname.data(), svalue, false);
+        register_variable(variables, (char*)sname.data(), value, false);
       } else {
         int len = strlen(var);
-        char *name = url_decode(var, len);
-        String sname(name, len, AttachString);
+        String sname = url_decode(var, len);
 
-        register_variable(variables, (char*)sname.data(), "", false);
+        register_variable(variables, (char*)sname.data(), empty_string, false);
       }
     }
 

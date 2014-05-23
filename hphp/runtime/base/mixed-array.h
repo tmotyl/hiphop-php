@@ -211,17 +211,16 @@ public:
   static ArrayData* LvalStr(ArrayData* ad, StringData* k, Variant*& ret,
                             bool copy);
   static ArrayData* LvalNew(ArrayData*, Variant*& ret, bool copy);
-  static ArrayData* SetInt(ArrayData*, int64_t k, const Variant& v, bool copy);
-  static ArrayData* SetStr(ArrayData*, StringData* k, const Variant& v, bool copy);
-
+  static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
+  static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
   static ArrayData* ZSetInt(ArrayData*, int64_t k, RefData* v);
   static ArrayData* ZSetStr(ArrayData*, StringData* k, RefData* v);
   static ArrayData* ZAppend(ArrayData* ad, RefData* v);
   static ArrayData* SetRefInt(ArrayData* ad, int64_t k, Variant& v, bool copy);
   static ArrayData* SetRefStr(ArrayData* ad, StringData* k, Variant& v,
                               bool copy);
-  static ArrayData* AddInt(ArrayData*, int64_t k, const Variant& v, bool copy);
-  static ArrayData* AddStr(ArrayData*, StringData* k, const Variant& v, bool copy);
+  static ArrayData* AddInt(ArrayData*, int64_t k, Cell v, bool copy);
+  static ArrayData* AddStr(ArrayData*, StringData* k, Cell v, bool copy);
   static ArrayData* RemoveInt(ArrayData*, int64_t k, bool copy);
   static ArrayData* RemoveStr(ArrayData*, const StringData* k, bool copy);
   static ArrayData* Copy(const ArrayData*);
@@ -242,10 +241,9 @@ public:
   static void ReleaseUncountedPacked(ArrayData*);
   static constexpr auto ValidMArrayIter = &ArrayCommon::ValidMArrayIter;
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
-  static constexpr auto Escalate =
-    reinterpret_cast<ArrayData* (*)(const ArrayData*)>(
-      ArrayCommon::ReturnFirstArg
-    );
+  static ArrayData* Escalate(const ArrayData* ad) {
+    return const_cast<ArrayData*>(ad);
+  }
 
   static ArrayData* EscalateForSort(ArrayData* ad);
   static void Ksort(ArrayData*, int sort_flags, bool ascending);
@@ -402,19 +400,23 @@ private:
   /**
    * findForNewInsert() CANNOT be used unless the caller can guarantee that
    * the relevant key is not already present in the array. Otherwise this can
-   * put the array into a bad state; use with caution.
+   * put the array into a bad state; use with caution. The *CheckUnbalanced
+   * version checks for the array becoming too unbalanced because of hash
+   * collisions, and is only called when an array Grow()s.
    */
   int32_t* findForNewInsert(size_t h0) const;
   int32_t* findForNewInsert(int32_t* table, size_t mask, size_t h0) const;
+  int32_t* findForNewInsertCheckUnbalanced(int32_t* table,
+                                           size_t mask, size_t h0) const;
 
   bool nextInsert(const Variant& data);
   ArrayData* nextInsertRef(Variant& data);
   ArrayData* nextInsertWithRef(const Variant& data);
-  ArrayData* addVal(int64_t ki, const Variant& data);
-  ArrayData* addVal(StringData* key, const Variant& data);
+  ArrayData* addVal(int64_t ki, Cell data);
+  ArrayData* addVal(StringData* key, Cell data);
 
   template <class K> ArrayData* addLvalImpl(K k, Variant*& ret);
-  template <class K> ArrayData* update(K k, const Variant& data);
+  template <class K> ArrayData* update(K k, Cell data);
   template <class K> ArrayData* updateRef(K k, Variant& data);
 
   template <class K> ArrayData* zSetImpl(K k, RefData* data);
@@ -433,9 +435,9 @@ private:
 
   Elm& allocElm(int32_t* ei);
 
-  MixedArray* setVal(TypedValue& tv, const Variant& v);
+  MixedArray* setVal(TypedValue& tv, Cell v);
   MixedArray* getLval(TypedValue& tv, Variant*& ret);
-  MixedArray* initVal(TypedValue& tv, const Variant& v);
+  MixedArray* initVal(TypedValue& tv, Cell v);
   MixedArray* initRef(TypedValue& tv, Variant& v);
   MixedArray* initLval(TypedValue& tv, Variant*& ret);
   MixedArray* initWithRef(TypedValue& tv, const Variant& v);
@@ -444,6 +446,14 @@ private:
   ArrayData* zInitVal(TypedValue& tv, RefData* v);
   ArrayData* zSetVal(TypedValue& tv, RefData* v);
 
+  /*
+   * Helper routine for inserting elements into a new array
+   * when Grow()ing the array, that also checks for potentially
+   * unbalanced entries because of hash collision.
+   */
+  static void InsertCheckUnbalanced(MixedArray* ad, int32_t* table,
+                                    uint32_t mask,
+                                    Elm* iter, Elm* stop);
   /*
    * grow() increases the hash table size and the number of slots for
    * elements by a factor of 2. grow() rebuilds the hash table, but it

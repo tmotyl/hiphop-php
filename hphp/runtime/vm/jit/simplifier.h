@@ -49,6 +49,8 @@ struct Simplifier {
   Simplifier& operator=(const Simplifier&) = delete;
 
   /*
+   * Simplify performs a number of optimizations.
+   *
    * In general, the simplifier transforms one instruction into zero or more
    * instructions. The pair represents the zero or more instructions to replace
    * the input with, plus the SSATmp* to use instead of the input instruction's
@@ -58,21 +60,18 @@ struct Simplifier {
     smart::vector<IRInstruction*> instrs;
     SSATmp* dst;
   };
-
-  /*
-   * Simplify performs a number of optimizations.
-   *
-   * In many cases this may involve returning a SSATmp* that should be
-   * used instead of the candidate instruction passed to this
-   * function.  If this function returns nullptr, the candidate
-   * instruction should still be used (but the call to simplify may
-   * have changed it, also).
-   */
   Result simplify(const IRInstruction*, bool typesMightRelax);
 
 private:
   SSATmp* simplifyWork(const IRInstruction*);
 
+  /*
+   * Individual simplification routines return nullptr if they don't
+   * want to change anything, or they can call gen any number of times
+   * to produce a different IR sequence, returning the thing gen'd
+   * that should be used as the value of the simplified instruction
+   * sequence.
+   */
   SSATmp* simplifyMov(SSATmp* src);
   SSATmp* simplifyNot(SSATmp* src);
   SSATmp* simplifyAbsDbl(const IRInstruction* inst);
@@ -130,7 +129,6 @@ private:
   SSATmp* simplifyConvCellToDbl(const IRInstruction*);
   SSATmp* simplifyFloor(const IRInstruction*);
   SSATmp* simplifyCeil(const IRInstruction*);
-  SSATmp* simplifyUnbox(const IRInstruction*);
   SSATmp* simplifyUnboxPtr(const IRInstruction*);
   SSATmp* simplifyBoxPtr(const IRInstruction*);
   SSATmp* simplifyCheckInit(const IRInstruction* inst);
@@ -157,6 +155,9 @@ private:
   SSATmp* simplifyDecRefStack(const IRInstruction*);
   SSATmp* simplifyLdLoc(const IRInstruction*);
   SSATmp* simplifyAssertNonNull(const IRInstruction*);
+  SSATmp* simplifyCallBuiltin(const IRInstruction*);
+  SSATmp* simplifyConvObjToBool(const IRInstruction*);
+  SSATmp* simplifyIsWaitHandle(const IRInstruction*);
 
   template <class Oper>
   SSATmp* simplifyConst(SSATmp* src1, SSATmp* src2, Oper op);

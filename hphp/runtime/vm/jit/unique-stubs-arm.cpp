@@ -129,7 +129,9 @@ void emitFuncPrologueRedispatch(UniqueStubs& us) {
   a.  Ldr  (x0, rStashedAR[AROFF(m_func)]);
   a.  Ldr  (w1, rStashedAR[AROFF(m_numArgsAndFlags)]);
   a.  And  (w1, w1, 0x1fffffff);
-  a.  Ldr  (w2, x0[Func::numParamsOff()]);
+  a.  Ldr  (w2, x0[Func::paramCountsOff()]);
+  // See Func::finishedEmittingParams and Func::numParams for rationale
+  a.  Lsr  (w2, w2, 0x1);
 
   // If we passed more args than declared, jump to the numParamsCheck.
   a.  Cmp  (w2, w1);
@@ -179,14 +181,14 @@ void emitFCallHelperThunk(UniqueStubs& us) {
   a.   Mov   (argReg(1), rVmSp);
   a.   Cmp   (rVmFp, rStashedAR);
   a.   B     (&popAndXchg, vixl::ne);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   a.   Br    (rReturnReg);
 
   a.   bind  (&popAndXchg);
   emitXorSwap(a, rStashedAR, rVmFp);
   // Put return address into ActRec.
   a.   Str   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
-  emitCall(a, CppCall(helper));
+  emitCall(a, CppCall::direct(helper));
   // Put return address back in the link register.
   a.   Ldr   (rLinkReg, rVmFp[AROFF(m_savedRip)]);
   emitXorSwap(a, rStashedAR, rVmFp);

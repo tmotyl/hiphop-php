@@ -126,14 +126,15 @@ void checkCreateErrors(c_WaitableWaitHandle* child) {
 
 }
 
-ObjectData*
+c_AsyncFunctionWaitHandle*
 c_AsyncFunctionWaitHandle::Create(const ActRec* fp,
+                                  size_t numSlots,
                                   JIT::TCA resumeAddr,
                                   Offset resumeOffset,
                                   ObjectData* child) {
   assert(fp);
   assert(!fp->resumed());
-  assert(fp->func()->isAsync());
+  assert(fp->func()->isAsyncFunction());
   assert(child);
   assert(child->instanceof(c_WaitableWaitHandle::classof()));
 
@@ -142,7 +143,7 @@ c_AsyncFunctionWaitHandle::Create(const ActRec* fp,
 
   checkCreateErrors(child_wh);
 
-  void* obj = Resumable::Create(fp, resumeAddr, resumeOffset,
+  void* obj = Resumable::Create(fp, numSlots, resumeAddr, resumeOffset,
                                 sizeof(c_AsyncFunctionWaitHandle));
   auto const waitHandle = new (obj) c_AsyncFunctionWaitHandle();
   waitHandle->incRefCount();
@@ -152,13 +153,14 @@ c_AsyncFunctionWaitHandle::Create(const ActRec* fp,
 }
 
 void c_AsyncFunctionWaitHandle::initialize(c_WaitableWaitHandle* child) {
-  auto session = AsioSession::Get();
-
+  setState(STATE_BLOCKED);
   m_child = child;
   m_privData = nullptr;
+
   blockOn(child);
 
   // needs to be called with non-zero refcnt
+  auto session = AsioSession::Get();
   if (UNLIKELY(session->hasOnAsyncFunctionCreateCallback())) {
     session->onAsyncFunctionCreate(this, child);
   }
@@ -220,6 +222,7 @@ void c_AsyncFunctionWaitHandle::run() {
     }
 
     // set up dependency
+    setState(STATE_BLOCKED);
     blockOn(child());
   } catch (const Object& exception) {
     // process exception thrown by the async function
@@ -240,6 +243,11 @@ void c_AsyncFunctionWaitHandle::onUnblocked() {
   }
 }
 
+void c_AsyncFunctionWaitHandle::ret(Cell& result) {
+  setState(STATE_SUCCEEDED);
+  cellCopy(result, m_resultOrException);
+}
+
 void c_AsyncFunctionWaitHandle::markAsSucceeded() {
   AsioSession* session = AsioSession::Get();
   if (UNLIKELY(session->hasOnAsyncFunctionSuccessCallback())) {
@@ -255,7 +263,9 @@ void c_AsyncFunctionWaitHandle::markAsFailed(const Object& exception) {
     session->onAsyncFunctionFail(this, exception);
   }
 
-  setException(exception.get());
+  setState(STATE_FAILED);
+  tvWriteObject(exception.get(), &m_resultOrException);
+  done();
 }
 
 void
@@ -270,19 +280,36 @@ String c_AsyncFunctionWaitHandle::getName() {
     case STATE_BLOCKED:
     case STATE_SCHEDULED:
     case STATE_RUNNING: {
+      auto func = actRec()->func();
+      if (!actRec()->getThisOrClass() ||
+          func->cls()->attrs() & AttrNoOverride) {
+        auto name = func->fullName();
+        if (func->isClosureBody()) {
+          const char* p = strchr(name->data(), ':');
+          if (p) {
+            return
+              concat(String(name->data(), p + 1 - name->data(), CopyString),
+                     s__closure_);
+          } else {
+            return s__closure_;
+          }
+        }
+        return const_cast<StringData*>(name);
+      }
       String funcName;
       if (actRec()->func()->isClosureBody()) {
         // Can we do better than this?
         funcName = s__closure_;
       } else {
-        funcName = actRec()->func()->name()->data();
+        funcName = const_cast<StringData*>(actRec()->func()->name());
       }
 
       String clsName;
       if (actRec()->hasThis()) {
-        clsName = actRec()->getThis()->getVMClass()->name()->data();
+        clsName = const_cast<StringData*>(actRec()->getThis()->
+                                          getVMClass()->name());
       } else if (actRec()->hasClass()) {
-        clsName = actRec()->getClass()->name()->data();
+        clsName = const_cast<StringData*>(actRec()->getClass()->name());
       } else {
         return funcName;
       }

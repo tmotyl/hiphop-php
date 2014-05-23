@@ -155,6 +155,18 @@ struct IterData : IRExtraData {
   uint32_t valId;
 };
 
+struct RDSHandleData : IRExtraData {
+  explicit RDSHandleData(RDS::Handle handle)
+    : handle(handle)
+  {}
+
+  std::string show() const {
+    return folly::to<std::string>(handle);
+  }
+
+  RDS::Handle handle;
+};
+
 struct ClassData : IRExtraData {
   explicit ClassData(const Class* cls) : cls(cls) {}
   std::string show() const {
@@ -263,6 +275,12 @@ struct ActRecInfo : IRExtraData {
   const StringData* invName;  // may be nullptr
   int32_t numArgs;
 
+  bool isFromFPushCtor() const {
+    ActRec ar;
+    ar.m_numArgsAndFlags = numArgs;
+    return ar.isFromFPushCtor();
+  }
+
   std::string show() const {
     ActRec ar;
     ar.m_numArgsAndFlags = numArgs;
@@ -300,6 +318,20 @@ struct StackOffset : IRExtraData {
 };
 
 /*
+ * Local offsets.
+ */
+struct LocalOffset : IRExtraData {
+  explicit LocalOffset(int32_t offset) : offset(offset) {}
+
+  std::string show() const { return folly::to<std::string>(offset); }
+
+  bool cseEquals(LocalOffset o) const { return offset == o.offset; }
+  size_t cseHash() const { return std::hash<int32_t>()(offset); }
+
+  int32_t offset;
+};
+
+/*
  * Bytecode offsets.
  */
 struct BCOffset : IRExtraData {
@@ -308,26 +340,36 @@ struct BCOffset : IRExtraData {
   Offset offset;
 };
 
+struct ProfileStrData : IRExtraData {
+  explicit ProfileStrData(const StringData* key)
+    : key(key)
+  {}
+
+  std::string show() const { return key->data(); }
+
+  const StringData* key;
+};
+
 /*
  * Translation IDs.
  */
 struct TransIDData : IRExtraData {
-  explicit TransIDData(JIT::TransID transId) : transId(transId) {}
+  explicit TransIDData(TransID transId) : transId(transId) {}
   std::string show() const { return folly::to<std::string>(transId); }
-  JIT::TransID transId;
+  TransID transId;
 };
 
 /*
  * Information needed to generate a REQ_RETRANSLATE_OPT service request.
  */
 struct ReqRetransOptData : IRExtraData {
-  explicit ReqRetransOptData(JIT::TransID transId, Offset offset)
+  explicit ReqRetransOptData(TransID transId, Offset offset)
       : transId(transId)
       , offset(offset) {}
   std::string show() const {
     return folly::to<std::string>(transId, ", ", offset);
   }
-  JIT::TransID transId;
+  TransID transId;
   Offset offset;
 };
 
@@ -360,34 +402,66 @@ struct DefInlineFPData : IRExtraData {
   Type retTypePred;
 };
 
-/*
- * FCallArray offsets
- */
 struct CallArrayData : IRExtraData {
-  explicit CallArrayData(Offset pcOffset, Offset aft, bool destroyLocals)
+  explicit CallArrayData(Offset pcOffset, Offset after, bool destroyLocals)
     : pc(pcOffset)
-    , after(aft)
+    , after(after)
     , destroyLocals(destroyLocals)
   {}
 
   std::string show() const {
     return folly::to<std::string>(pc, ",", after,
-                                  destroyLocals ? " destroy locals" : "");
+                                  destroyLocals ? ",destroyLocals" : "");
   }
 
-  Offset pc, after;
+  Offset pc;                    // XXX why isn't this available in the marker?
+  Offset after;
+  bool destroyLocals;
+};
+
+struct CallBuiltinData : IRExtraData {
+  explicit CallBuiltinData(const Func* callee, bool destroyLocals)
+    : callee{callee}
+    , destroyLocals{destroyLocals}
+  {}
+
+  std::string show() const {
+    return folly::to<std::string>(
+      callee->fullName()->data(),
+      destroyLocals ? ",destroyLocals" : ""
+    );
+  }
+
+  const Func* callee;
   bool destroyLocals;
 };
 
 struct CallData : IRExtraData {
-  explicit CallData(bool destroy)
-    : destroyLocals(destroy)
+  explicit CallData(uint32_t numParams,
+                    Offset after,
+                    const Func* callee,
+                    bool destroy)
+    : numParams(numParams)
+    , after(after)
+    , callee(callee)
+    , destroyLocals(destroy)
   {}
 
   std::string show() const {
-    return destroyLocals ? "destroy locals" : "";
+    return folly::to<std::string>(
+      numParams,
+      ',',
+      after,
+      callee
+        ? folly::format(",{}", callee->fullName()->data()).str()
+        : std::string{},
+      destroyLocals ? ",destroyLocals" : ""
+    );
   }
 
+  uint32_t numParams;
+  Offset after;
+  const Func* callee;  // nullptr if not statically known
   bool destroyLocals;
 };
 
@@ -459,14 +533,17 @@ struct LdFuncCachedData : IRExtraData {
 };
 
 struct LdObjMethodData : IRExtraData {
-  explicit LdObjMethodData(bool fatal)
-    : fatal(fatal)
+  explicit LdObjMethodData(const StringData* method, bool fatal)
+    : method(method)
+    , fatal(fatal)
   {}
 
   std::string show() const {
-    return folly::to<std::string>(fatal ? "fatal" : "warn");
+    return folly::to<std::string>(method->data(), ',',
+      fatal ? "fatal" : "warn");
   }
 
+  const StringData* method;
   bool fatal;
 };
 
@@ -638,16 +715,16 @@ struct ReDefSPData : IRExtraData {
 };
 
 struct RBTraceData : IRExtraData {
-  RBTraceData(Trace::RingBufferType t, SrcKey sk_)
+  RBTraceData(Trace::RingBufferType t, SrcKey sk)
     : type(t)
-    , sk(sk_)
+    , sk(sk)
     , msg(nullptr)
   {}
 
-  RBTraceData(Trace::RingBufferType t, const StringData* msg_)
+  RBTraceData(Trace::RingBufferType t, const StringData* msg)
     : type(t)
     , sk()
-    , msg(msg_)
+    , msg(msg)
   {
     assert(msg->isStatic());
   }
@@ -705,9 +782,9 @@ struct NewStructData : IRExtraData {
 
 struct RawMemData : IRExtraData {
 # define RAW_MEM_DATA_TYPES                     \
+  RAW_TYPE(AsyncState)                          \
   RAW_TYPE(AsyncResumeAddr)                     \
   RAW_TYPE(AsyncResumeOffset)                   \
-  RAW_TYPE(AsyncState)                          \
   RAW_TYPE(AsyncChild)                          \
   RAW_TYPE(ContResumeAddr)                      \
   RAW_TYPE(ContResumeOffset)                    \
@@ -757,9 +834,13 @@ X(AssertLoc,                    LocalId);
 X(LdLocAddr,                    LocalId);
 X(LdLoc,                        LocalId);
 X(TrackLoc,                     LocalId);
+X(LdGbl,                        LocalId);
 X(DecRefLoc,                    LocalId);
 X(StLoc,                        LocalId);
+X(StCell,                       LocalOffset);
+X(StGbl,                        LocalId);
 X(StLocNT,                      LocalId);
+X(CopyCells,                    LocalId);
 X(IterFree,                     IterId);
 X(MIterFree,                    IterId);
 X(CIterFree,                    IterId);
@@ -802,7 +883,7 @@ X(ReqRetranslateOpt,            ReqRetransOptData);
 X(CheckCold,                    TransIDData);
 X(IncProfCounter,               TransIDData);
 X(Call,                         CallData);
-X(CallBuiltin,                  CallData);
+X(CallBuiltin,                  CallBuiltinData);
 X(CallArray,                    CallArrayData);
 X(RetCtrl,                      RetCtrlData);
 X(FunctionExitSurpriseHook,     RetCtrlData);
@@ -872,6 +953,8 @@ X(StRaw,                        RawMemData);
 X(StAsyncArRaw,                 RawMemData);
 X(LdContArRaw,                  RawMemData);
 X(StContArRaw,                  RawMemData);
+X(ProfileArray,                 RDSHandleData);
+X(ProfileStr,                   ProfileStrData);
 
 #undef X
 

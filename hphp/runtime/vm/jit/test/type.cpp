@@ -155,7 +155,7 @@ TEST(Type, RuntimeType) {
   EXPECT_FALSE(t.subtypeOf(Type::Dbl));
 
   rt = HPHP::JIT::RuntimeType(DataType::KindOfObject,
-                                 DataType::KindOfInvalid);
+                              DataType::KindOfInvalid);
   rt = rt.setKnownClass(SystemLib::s_TraversableClass);
   t = Type(rt);
   EXPECT_TRUE(t.subtypeOf(Type::Obj));
@@ -219,6 +219,7 @@ TEST(Type, UnionOf) {
   EXPECT_EQ(Type::UncountedInit, Type::unionOf(Type::Int, Type::Dbl));
   EXPECT_EQ(Type::Str, Type::unionOf(Type::StaticStr, Type::Str));
   EXPECT_EQ(Type::Gen, Type::unionOf(Type::Cell, Type::BoxedInt));
+  EXPECT_EQ(Type::Bool, Type::unionOf(Type::cns(true), Type::cns(false)));
 }
 
 TEST(Type, Top) {

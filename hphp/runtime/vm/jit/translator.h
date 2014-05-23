@@ -237,10 +237,6 @@ typedef hphp_hash_map<RegionDesc::BlockId, Block*> BlockIdToIRBlockMap;
 typedef hphp_hash_map<RegionDesc::BlockId,
                       RegionDesc::Block*> BlockIdToRegionBlockMap;
 
-
-
-const char* getTransKindName(TransKind kind);
-
 /*
  * Used to maintain a mapping from the bytecode to its corresponding x86.
  */
@@ -259,6 +255,7 @@ struct TransRec {
   TransKind              kind;
   SrcKey                 src;
   MD5                    md5;
+  std::string            funcName;
   Offset                 bcStopOffset;
   std::vector<DynLocation>
                          dependencies;
@@ -271,20 +268,29 @@ struct TransRec {
 
   TransRec() {}
 
-  TransRec(SrcKey    s,
-           MD5       _md5,
-           TransKind _kind,
-           TCA       _aStart = 0,
-           uint32_t  _aLen = 0,
-           TCA       _astubsStart = 0,
-           uint32_t  _astubsLen = 0) :
-      id(0), kind(_kind), src(s), md5(_md5), bcStopOffset(0),
-      aStart(_aStart), aLen(_aLen),
-      astubsStart(_astubsStart), astubsLen(_astubsLen)
+  TransRec(SrcKey      s,
+           MD5         _md5,
+           std::string _funcName,
+           TransKind   _kind,
+           TCA         _aStart = 0,
+           uint32_t    _aLen = 0,
+           TCA         _astubsStart = 0,
+           uint32_t    _astubsLen = 0)
+      : id(0)
+      , kind(_kind)
+      , src(s)
+      , md5(_md5)
+      , funcName(_funcName)
+      , bcStopOffset(0)
+      , aStart(_aStart)
+      , aLen(_aLen)
+      , astubsStart(_astubsStart)
+      , astubsLen(_astubsLen)
     { }
 
   TransRec(SrcKey                   s,
            MD5                      _md5,
+           std::string              _funcName,
            TransKind                _kind,
            const Tracelet*          t,
            TCA                      _aStart = 0,
@@ -298,16 +304,35 @@ struct TransRec {
   std::string print(uint64_t profCount) const;
 };
 
+/*
+ * The information about the context a translation is ocurring
+ * in---these fields are fixed for the whole translation.  Many
+ * objects in the JIT need access to this.
+ */
+struct TransContext {
+  TransID transID;     // may be kInvalidTransID if not for a real translation
+  Offset initBcOffset;
+  Offset initSpOffset;
+  bool resumed;
+  const Func* func;
+};
+
+/*
+ * Arguments for the translate() entry points in the translator.
+ * These include a variety of flags that help decide what to
+ * translate, or what to do after we're done, so it's distinct from
+ * the TransContext above.
+ */
 struct TranslArgs {
   TranslArgs(const SrcKey& sk, bool align)
-      : m_sk(sk)
-      , m_align(align)
-      , m_interp(false)
-      , m_setFuncBody(false)
-      , m_transId(InvalidID)
-      , m_region(nullptr)
-      , m_dryRun(false)
-    {}
+    : m_sk(sk)
+    , m_align(align)
+    , m_interp(false)
+    , m_setFuncBody(false)
+    , m_transId(kInvalidTransID)
+    , m_region(nullptr)
+    , m_dryRun(false)
+  {}
 
   TranslArgs& sk(const SrcKey& sk) {
     m_sk = sk;
@@ -419,8 +444,7 @@ public:
     Success
   };
   static const char* translateResultName(TranslateResult r);
-  void traceStart(Offset initBcOffset, Offset initSpOffset, bool resumed,
-                  const Func* func);
+  void traceStart(TransContext);
   void traceEnd();
   void traceFree();
 
@@ -544,6 +568,7 @@ private:
 
 private:
   int m_analysisDepth;
+  bool m_useAHot;
 
 public:
   void clearDbgBL();
@@ -563,6 +588,14 @@ public:
   int analysisDepth() const {
     assert(m_analysisDepth >= 0);
     return m_analysisDepth;
+  }
+
+  bool useAHot() const {
+    return m_useAHot;
+  }
+
+  void setUseAHot(bool val) {
+    m_useAHot = val;
   }
 
   // Start a new translation space. Returns true IFF this thread created
@@ -768,6 +801,8 @@ enum OutTypeConstraints {
   OutClassRef,          // KindOfClass
   OutFPushCufSafe,      // FPushCufSafe pushes two values of different
                         // types and an ActRec
+
+  OutIsTypeL,           // output for IsTypeL instructions
 
   OutNone,
 };

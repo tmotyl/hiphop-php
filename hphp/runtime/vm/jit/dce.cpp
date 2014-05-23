@@ -34,7 +34,7 @@ namespace HPHP {
 namespace JIT {
 namespace {
 
-TRACE_SET_MOD(hhir);
+TRACE_SET_MOD(hhir_dce);
 
 /* DceFlags tracks the state of one instruction during dead code analysis. */
 struct DceFlags {
@@ -119,8 +119,7 @@ bool isUnguardedLoad(IRInstruction* inst) {
           (opc == LdLoc && type == Type::Gen) ||
           (opc == LdRef && type == Type::Cell) ||
           (opc == LdMem && type == Type::Cell &&
-           inst->src(0)->type() == Type::PtrToCell) ||
-          (opc == Unbox && type == Type::Cell));
+           inst->src(0)->type() == Type::PtrToCell));
 }
 
 // removeUnreachable erases unreachable blocks from unit, and returns
@@ -198,8 +197,10 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
   FTRACE(3, "AR:vvvvvvvvvvvvvvvvvvvvv\n");
   if (do_assert) {
     for (UNUSED auto const& pair : uses) {
-      assert(pair.first->isA(Type::FramePtr));
-      assert(pair.first->inst()->is(DefInlineFP));
+      assert((pair.first->isA(Type::FramePtr) &&
+              pair.first->inst()->is(DefInlineFP)) ||
+             (pair.first->isA(Type::StkPtr) &&
+              pair.first->inst()->is(SpillFrame)));
     }
   }
 
@@ -218,7 +219,7 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
       case StLoc: {
         auto const frameInst = frameRoot(inst->src(0)->inst());
         if (frameInst->op() == DefInlineFP) {
-          ITRACE(4, "{} weak use of {}\n", *inst, *frameInst->dst());
+          ITRACE(4, "weak use of {} from {}\n", *frameInst->dst(), *inst);
           state[frameInst].incWeakUse();
         }
         break;
@@ -227,25 +228,16 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
       case PassFP: {
         auto frameInst = frameRoot(inst->src(0)->inst());
         if (frameInst->op() == DefInlineFP) {
-          ITRACE(4, "{} weak use of {}\n", *inst, *frameInst->dst());
+          ITRACE(4, "weak use of {} from {}\n", *frameInst->dst(), *inst);
           state[frameInst].incWeakUse();
         }
         break;
       }
 
-      /* DefInlineFP counts as two weak uses of its containing frame, one for
-       * the DefInlineFP itself and one for the SpillFrame used here. We wait
-       * until this instruction to mark the SpillFrame's use as weak so a
-       * normal Call will prevent frames from being elided. */
       case DefInlineFP: {
         auto outerFrame = frameRoot(inst->src(2)->inst());
         if (outerFrame->is(DefInlineFP)) {
-          ITRACE(4, "{} weak use of {}\n", *inst, *outerFrame->dst());
-          state[outerFrame].incWeakUse();
-
-          auto DEBUG_ONLY spillFrame = findSpillFrame(inst->src(0));
-          assert(spillFrame);
-          ITRACE(4, "{} weak use of {}\n", *spillFrame, *outerFrame->dst());
+          ITRACE(4, "weak use of {} from {}\n", *outerFrame->dst(), *inst);
           state[outerFrame].incWeakUse();
         }
         break;
@@ -255,7 +247,7 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
       case DefInlineSP: {
         auto const frameInst = frameRoot(inst->src(1)->inst());
         if (frameInst->op() == DefInlineFP) {
-          ITRACE(4, "{} weak use of {}\n", *inst, *frameInst->dst());
+          ITRACE(4, "weak use of {} from {}\n", *frameInst->dst(), *inst);
           state[frameInst].incWeakUse();
         }
         break;
@@ -264,26 +256,34 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
       case InlineReturn: {
         auto* frameInst = frameRoot(inst->src(0)->inst());
         assert(frameInst->is(DefInlineFP));
+        auto spillInst = findSpillFrame(frameInst->src(0));
+        assert(spillInst);
+
         auto frameUses = folly::get_default(uses, frameInst->dst(), 0);
-        auto* spillInst = findSpillFrame(frameInst->src(0));
+        auto spillUses = uses.find(spillInst->dst())->second;
+        assert(spillUses >= 2);
 
         auto weakUses = state[frameInst].weakUseCount();
         // We haven't counted this InlineReturn as a weak use yet,
-        // which is where this '1' comes from.
-        if (frameUses - weakUses == 1) {
+        // which is where the '1' comes from.
+        //
+        // The '2' means that the SpillFrame is used only by the
+        // DefInlineFP and its corresponding DefInlineSP. We cannot
+        // safely eliminate a DefInlineFP whose SpillFrame is still
+        // used elsewhere.
+        if (frameUses - weakUses == 1 && spillUses == 2) {
           ITRACE(4, "killing frame {}\n", *frameInst);
           killedFrames = true;
 
           Offset retBCOff = frameInst->extra<DefInlineFP>()->retBCOff;
           retFixupMap[frameInst->dst()] = retBCOff;
-          ITRACE(4, "replacing {} and {} with PassFP/PassSP, removing {}\n",
-                 *frameInst, *spillInst, *inst);
+          ITRACE(4, "replacing {} with PassFP, removing {}\n",
+                 *frameInst, *inst);
           unit.replace(frameInst, PassFP, frameInst->src(2));
-          unit.replace(spillInst, PassSP, spillInst->src(0));
           inst->convertToNop();
         } else {
-          ITRACE(3, "not killing frame {}, weak/strong {}/{}\n",
-                 *frameInst, weakUses, frameUses);
+          ITRACE(3, "not killing frame {}, weak/strong {}/{}, SpillFrame used "
+                 "{} times\n", *frameInst, weakUses, frameUses, spillUses);
         }
         break;
       }
@@ -307,15 +307,15 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
    * enclosing frame elided.
    */
   smart::hash_map<Block*, uint32_t> frameDepths;
-  auto depth = [](const Func* func) {
-    return func->numSlotsInFrame() + func->maxStackCells();
-  };
   frameDepths[blocks.front()] = 0;
 
   // We limit the total stack depth during inlining, so this is the deepest
   // we'll ever have to worry about.
-  auto* outerFunc = blocks.front()->front().marker().func();
-  auto const maxDepth = depth(outerFunc) + kStackCheckLeafPadding;
+  auto const outerFunc = blocks.front()->front().marker().func();
+  auto const maxDepth = outerFunc->maxStackCells() + kStackCheckLeafPadding;
+  ITRACE(3, "maxdepth: {}, outerFunc depth: {}\n",
+         maxDepth,
+         outerFunc->maxStackCells());
 
   ITRACE(3, "Killed some frames. Iterating over blocks for fixups.\n");
   for (auto* block : blocks) {
@@ -331,19 +331,26 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
         case DefInlineFP: {
           auto* spillInst = findSpillFrame(inst.src(0));
           assert(spillInst);
-          curDepth += depth(spillInst->marker().func());
-          ITRACE(4, "DefInlineFP ({}): weak/strong uses: {}/{}\n",
+          ITRACE(4, "DefInlineFP ({}): weak/strong uses: {}/{}: "
+                 "depth: {} += {}\n",
                  inst, state[inst].weakUseCount(),
-                 folly::get_default(uses, inst.dst(), 0));
+                 folly::get_default(uses, inst.dst(), 0),
+                 curDepth,
+                 spillInst->marker().func()->maxStackCells());
+          curDepth += spillInst->marker().func()->maxStackCells();
           break;
         }
 
         case InlineReturn: {
-          auto* fpInst = frameRoot(inst.src(0)->inst());
+          auto const fpInst = frameRoot(inst.src(0)->inst());
           assert(fpInst->is(DefInlineFP));
-          auto* spillInst = findSpillFrame(fpInst->src(0));
+          auto const spillInst = findSpillFrame(fpInst->src(0));
           assert(spillInst);
-          curDepth -= depth(spillInst->marker().func());
+          ITRACE(4, "InlineReturn ({}): depth {} -= {}\n",
+                 inst,
+                 curDepth,
+                 spillInst->marker().func()->maxStackCells());
+          curDepth -= spillInst->marker().func()->maxStackCells();
           assert(findPassFP(inst.src(0)->inst()) == nullptr &&
                  "Eliminated DefInlineFP but left its InlineReturn");
           break;
@@ -378,9 +385,9 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
         case DecRefMem: {
           DEBUG_ONLY auto spOff = inst.marker().spOff();
           auto newDepth = int32_t(maxDepth - curDepth);
-          assert(spOff <= newDepth);
           ITRACE(4, "adjusting marker spOff for {} from {} to {}\n",
                  inst, spOff, newDepth);
+          assert(spOff <= newDepth);
           inst.marker().setSpOff(newDepth);
           break;
         }
@@ -416,7 +423,7 @@ void optimizeActRecs(BlockList& blocks, DceState& state, IRUnit& unit,
          */
         case Call: {
           if (auto fpInst = findPassFP(inst.src(1)->inst())) {
-            not_reached(); // TODO t3203284
+            always_assert(false); // TODO t3203284
             assert(retFixupMap.count(fpInst->dst()));
             ITRACE(4, "{} repairing\n", inst);
             Offset retBCOff = retFixupMap[fpInst->dst()];
@@ -477,12 +484,20 @@ void eliminateDeadCode(IRUnit& unit) {
         continue;
       }
 
-      if (RuntimeOption::EvalHHIRInlineFrameOpts &&
-          src->isA(Type::FramePtr) && !srcInst->is(LdRaw, LdContActRec)) {
-        auto* root = frameRoot(srcInst);
-        if (root->is(DefInlineFP)) {
-          FTRACE(4, "adding use to {} from {}\n", *src, *inst);
-          ++uses[root->dst()];
+      if (RuntimeOption::EvalHHIRInlineFrameOpts) {
+        if (src->isA(Type::FramePtr) && !srcInst->is(LdRaw, LdContActRec)) {
+          auto* root = frameRoot(srcInst);
+          if (root->is(DefInlineFP)) {
+            FTRACE(4, "adding use to {} from {}\n", *src, *inst);
+            ++uses[root->dst()];
+          }
+        }
+        if (src->isA(Type::StkPtr) && !srcInst->is(RetAdjustStack)) {
+          auto root = findSpillFrame(src);
+          if (root) {
+            FTRACE(4, "adding use to {} from {}\n", *src, *inst);
+            ++uses[root->dst()];
+          }
         }
       }
 

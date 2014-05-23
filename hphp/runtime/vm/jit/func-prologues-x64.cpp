@@ -129,12 +129,13 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
   Asm a { mcg->code.main() };
 
-  if (tx->mode() == TransProflogue) {
+  if (tx->mode() == TransKind::Proflogue) {
     assert(func->shouldPGO());
     TransID transId  = tx->profData()->curTransID();
     auto counterAddr = tx->profData()->transCounterAddr(transId);
     a.movq(counterAddr, rAsm);
     a.decq(rAsm[0]);
+    tx->profData()->setProfiling(func->getFuncId());
   }
 
   // Note: you're not allowed to use rVmSp around here for anything in
@@ -187,7 +188,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       a.    subq   (int(sizeof(Cell)), rVmSp);
       a.    incl   (eax);
       emitStoreUninitNull(a, 0, rVmSp);
-      a.    cmpl   (numNonVariadicParams, eax);
+      a.    cmpl   (int(numNonVariadicParams), eax);
       a.    jl8    (loopTop);
       if (func->hasVariadicCaptureParam()) {
         emitStoreTVType(a, KindOfArray, rVmSp[-sizeof(Cell) + TVOFF(m_type)]);
@@ -227,7 +228,6 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
       a.shrq(1, rAsm);
       ifThen(a, CC_NBE, [&] {
         a.shlq(1, rAsm);
-        // XXX can objects be static?
         emitIncRefCheckNonStatic(a, rAsm, KindOfObject);
       });
     }
@@ -320,7 +320,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
         a.  emitImmReg((intptr_t)func, argNumToRegName[0]);
         a.  emitImmReg(i, argNumToRegName[1]);
         emitCall(a, TCA(JIT::raiseMissingArgument));
-        mcg->fixupMap().recordFixup(a.frontier(), fixup);
+        mcg->recordSyncPoint(a.frontier(), fixup.m_pcOffset, fixup.m_spOffset);
         break;
       }
     }
@@ -329,8 +329,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
   // Check surprise flags in the same place as the interpreter: after
   // setting up the callee's frame but before executing any of its
   // code
-  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), false,
-                              mcg->fixupMap(), fixup);
+  emitCheckSurpriseFlagsEnter(mcg->code.main(), mcg->code.stubs(), fixup);
 
   if (func->isClosureBody() && func->cls()) {
     int entry = nPassed <= numNonVariadicParams
@@ -477,10 +476,9 @@ SrcKey emitMagicFuncPrologue(Func* func, uint32_t nPassed, TCA& start) {
   if (nPassed == 2) skFuncBody = skFor2Args;
 
   if (RuntimeOption::HHProfServerEnabled && callFixup) {
-    mcg->fixupMap().recordFixup(
-      callFixup,
-      Fixup { skFuncBody.offset() - func->base(), func->numSlotsInFrame() }
-    );
+    mcg->recordSyncPoint(callFixup,
+                         skFuncBody.offset() - func->base(),
+                         func->numSlotsInFrame());
   }
 
   return skFuncBody;
